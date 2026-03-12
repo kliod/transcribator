@@ -1,0 +1,21 @@
+
+{
+  "model": "turbo",
+  "language": null,
+  "output_formats": "all",
+  "output_dir": null,
+  "quiet": false,
+  "high_quality": true,
+  "input_dir": null,
+  "no_timestamps": false,
+  "clean_txt": true,
+  "diarize": "pyannote",
+  "hf_token": null,
+  "beam_size": 5,
+  "best_of": 5,
+  "preprocess_audio": true,
+  "min_speakers": null,
+  "max_speakers": null,
+  "diarization_threshold": 0.7,
+  "pause_threshold": 2.0
+}
