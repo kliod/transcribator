@@ -16,3 +16,7 @@ transcribator.json
 
 # Кэш Whisper
 .cache/
+
+# Данные (не коммитим вход и выход)
+input/
+output/
