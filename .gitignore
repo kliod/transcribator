@@ -1,0 +1,18 @@
+# Виртуальное окружение
+.venv/
+venv/
+env/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+dist/
+build/
+
+# Локальный конфиг с токенами
+transcribator.json
+
+# Кэш Whisper
+.cache/
