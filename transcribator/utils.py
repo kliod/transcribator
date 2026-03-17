@@ -3,11 +3,48 @@
 import os
 import shutil
 from pathlib import Path
-from typing import List, Optional, Tuple, Dict
+from typing import Any, Dict, List, Optional, Tuple
 
 
 # Поддерживаемые форматы видео
 VIDEO_EXTENSIONS = {'.mp4', '.avi', '.mov', '.mkv', '.webm', '.flv', '.wmv', '.m4v', '.3gp', '.ogv'}
+
+WHISPER_MODEL_CHOICES = [
+    'tiny',
+    'base',
+    'small',
+    'medium',
+    'large-v1',
+    'large-v2',
+    'large-v3',
+    'large',
+    'large-v3-turbo',
+    'turbo',
+]
+
+
+def normalize_model_name(model_name: Optional[str]) -> Optional[str]:
+    """Возвращает каноническое имя модели Whisper для алиасов."""
+    if model_name is None:
+        return None
+
+    aliases = {
+        'large': 'large-v3',
+        'large-v3-turbo': 'turbo',
+    }
+    return aliases.get(model_name.lower(), model_name.lower())
+
+
+def get_listed_model_keys() -> List[str]:
+    """Возвращает модели в порядке, удобном для показа пользователю."""
+    return list(WHISPER_MODEL_CHOICES)
+
+
+def is_model_cached(model_name: str, cached_models: Optional[Dict[str, Dict[str, Any]]] = None) -> bool:
+    """Проверяет кэш с учетом алиасов large/turbo."""
+    normalized_model_name = normalize_model_name(model_name)
+    cache = cached_models if cached_models is not None else get_cached_models()
+    return normalized_model_name in cache
 
 
 def is_video_file(file_path: str) -> bool:
@@ -212,8 +249,9 @@ def clear_model_cache(model_name: Optional[str] = None) -> Tuple[int, float]:
     if model_name:
         # Удаляем конкретную модель
         cached_models = get_cached_models()
-        if model_name in cached_models:
-            model_file = Path(cached_models[model_name]['file'])
+        normalized_model_name = normalize_model_name(model_name)
+        if normalized_model_name in cached_models:
+            model_file = Path(cached_models[normalized_model_name]['file'])
             if model_file.exists():
                 freed_space_bytes = model_file.stat().st_size
                 model_file.unlink()
@@ -229,7 +267,7 @@ def clear_model_cache(model_name: Optional[str] = None) -> Tuple[int, float]:
     return deleted_count, freed_space_mb
 
 
-def get_cached_models() -> Dict[str, Dict[str, any]]:
+def get_cached_models() -> Dict[str, Dict[str, Any]]:
     """
     Возвращает информацию о закэшированных моделях Whisper.
     
@@ -255,7 +293,7 @@ def get_cached_models() -> Dict[str, Dict[str, any]]:
         'medium.en.pt': 'medium.en',
         'large-v1.pt': 'large-v1',
         'large-v2.pt': 'large-v2',
-        'large-v3.pt': 'large',
+        'large-v3.pt': 'large-v3',
         'large-v3-turbo.pt': 'turbo',
     }
     
@@ -310,12 +348,40 @@ def get_model_info() -> dict:
             'accuracy': 'Высокая',
             'description': 'Высокая точность, требует больше времени'
         },
+        'large-v1': {
+            'name': 'large-v1',
+            'size': '1550 MB',
+            'description': 'Original large Whisper model',
+            'speed': 'Very slow',
+            'accuracy': 'Maximum'
+        },
+        'large-v2': {
+            'name': 'large-v2',
+            'size': '1550 MB',
+            'description': 'Improved large-v1 model',
+            'speed': 'Very slow',
+            'accuracy': 'Maximum'
+        },
+        'large-v3': {
+            'name': 'large-v3',
+            'size': '1550 MB',
+            'description': 'Latest full-size large Whisper model',
+            'speed': 'Very slow',
+            'accuracy': 'Maximum'
+        },
         'large': {
             'name': 'large',
             'size': '1550 MB',
             'speed': 'Очень медленная',
             'accuracy': 'Максимальная',
             'description': 'Максимальная точность, требует много времени и памяти'
+        },
+        'large-v3-turbo': {
+            'name': 'large-v3-turbo',
+            'size': '1550 MB',
+            'speed': 'Fast',
+            'accuracy': 'High',
+            'description': 'Official turbo model name based on large-v3'
         },
         'turbo': {
             'name': 'turbo',

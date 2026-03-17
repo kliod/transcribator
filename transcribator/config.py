@@ -7,6 +7,7 @@ import os
 
 
 DEFAULT_CONFIG = {
+    "engine": "faster-whisper",
     "model": "small",
     "language": None,
     "output_formats": "all",
