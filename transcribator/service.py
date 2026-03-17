@@ -8,7 +8,12 @@ from .audio_preparation import prepare_audio_file
 from .backends import build_transcriber
 from .contracts import TranscriptionRequest, TranscriptionResult, TranscriptionSegment
 from .diarization import SpeakerDiarizer
-from .exporter import export_transcription, export_txt
+from .exporter import (
+    export_transcription,
+    export_txt,
+    render_text_transcript,
+    speaker_label_template_for_language,
+)
 from .utils import ensure_output_directory, get_output_filename
 
 
@@ -37,12 +42,13 @@ class TranscriptionService:
             diarization_mode = request.normalized_diarization_mode()
             if diarization_mode != "none":
                 self._notify(status_callback, "diarizing", "Assigning speakers")
-                result.segments = self._apply_diarization(
+                result.segments, diarization_metadata = self._apply_diarization(
                     result.segments,
                     diarization_mode,
                     prepared_audio_path,
                     request,
                 )
+                result.metadata.update(diarization_metadata)
 
             self._notify(status_callback, "exporting", "Writing output files")
             output_directory = ensure_output_directory(request.output_dir, request.input_path)
@@ -69,27 +75,17 @@ class TranscriptionService:
         diarization_mode: str,
         audio_path: str,
         request: TranscriptionRequest,
-    ) -> List[TranscriptionSegment]:
+    ) -> Tuple[List[TranscriptionSegment], dict]:
         segment_dicts = [segment.to_dict() for segment in segments]
         diarizer = self._create_diarizer(diarization_mode, request)
 
-        try:
-            diarized_dicts = diarizer.diarize(
-                segment_dicts,
-                audio_path=audio_path if diarization_mode in ("pyannote", "auto") else None,
-                hf_token=request.hf_token,
-            )
-        except Exception:
-            if diarization_mode not in ("pyannote", "auto"):
-                raise
+        diarized_dicts = diarizer.diarize(
+            segment_dicts,
+            audio_path=audio_path if diarization_mode in ("pyannote", "auto") else None,
+            hf_token=request.hf_token,
+        )
 
-            fallback = SpeakerDiarizer(
-                method="simple",
-                pause_threshold=request.pause_threshold if request.pause_threshold is not None else 2.0,
-            )
-            diarized_dicts = fallback.diarize(segment_dicts, audio_path=None, hf_token=None)
-
-        return [
+        diarized_segments = [
             TranscriptionSegment(
                 start=float(segment["start"]),
                 end=float(segment["end"]),
@@ -98,23 +94,21 @@ class TranscriptionService:
             )
             for segment in diarized_dicts
         ]
+        return diarized_segments, {
+            "diarization_method": diarization_mode,
+            "diarization_requested_device": request.normalized_diarization_device(),
+            "diarization_device": diarizer.resolved_device,
+        }
 
     def _create_diarizer(self, diarization_mode: str, request: TranscriptionRequest) -> SpeakerDiarizer:
-        try:
-            return SpeakerDiarizer(
-                method=diarization_mode,
-                pause_threshold=request.pause_threshold if request.pause_threshold is not None else 2.0,
-                min_speakers=request.min_speakers,
-                max_speakers=request.max_speakers,
-                clustering_threshold=request.diarization_threshold,
-            )
-        except Exception:
-            if diarization_mode != "pyannote":
-                raise
-            return SpeakerDiarizer(
-                method="simple",
-                pause_threshold=request.pause_threshold if request.pause_threshold is not None else 2.0,
-            )
+        return SpeakerDiarizer(
+            method=diarization_mode,
+            pause_threshold=request.pause_threshold if request.pause_threshold is not None else 2.0,
+            min_speakers=request.min_speakers,
+            max_speakers=request.max_speakers,
+            clustering_threshold=request.diarization_threshold,
+            device=request.normalized_diarization_device(),
+        )
 
     def _build_output_base_path(
         self,
@@ -136,6 +130,7 @@ class TranscriptionService:
         segment_dicts = [segment.to_dict() for segment in segments]
         include_speakers = any(segment.speaker is not None for segment in segments)
         formats = request.normalized_output_formats()
+        speaker_label_template = speaker_label_template_for_language(request.normalized_ui_language())
 
         export_transcription(
             segment_dicts,
@@ -143,6 +138,7 @@ class TranscriptionService:
             formats,
             include_timestamps_in_txt=not request.no_timestamps,
             include_speakers=include_speakers,
+            speaker_label_template=speaker_label_template,
         )
 
         artifacts = {
@@ -150,7 +146,11 @@ class TranscriptionService:
             for fmt in formats
         }
 
-        preview_text = self._render_clean_preview(segments)
+        preview_text = self._render_preview(
+            segment_dicts,
+            include_timestamps=not request.no_timestamps,
+            ui_language=request.normalized_ui_language(),
+        )
 
         if request.clean_txt:
             clean_path = str(
@@ -161,29 +161,25 @@ class TranscriptionService:
                 clean_path,
                 include_timestamps=False,
                 include_speakers=include_speakers,
+                speaker_label_template=speaker_label_template,
             )
             artifacts["clean_txt"] = clean_path
 
         return artifacts, preview_text
 
-    def _render_clean_preview(self, segments: Iterable[TranscriptionSegment]) -> str:
-        lines: List[str] = []
-        previous_speaker = None
-
-        for segment in segments:
-            text = segment.text.strip()
-            if not text:
-                continue
-
-            if segment.speaker is not None and segment.speaker != previous_speaker:
-                if lines:
-                    lines.append("")
-                lines.append(f"[Speaker {segment.speaker + 1}]")
-                previous_speaker = segment.speaker
-
-            lines.append(text)
-
-        return "\n".join(lines).strip()
+    def _render_preview(
+        self,
+        segments: Iterable[dict],
+        *,
+        include_timestamps: bool,
+        ui_language: str,
+    ) -> str:
+        return render_text_transcript(
+            segments,
+            include_timestamps=include_timestamps,
+            include_speakers=any(segment.get("speaker") is not None for segment in segments),
+            speaker_label_template=speaker_label_template_for_language(ui_language),
+        )
 
     def _notify(self, status_callback: StatusCallback, status: str, message: str) -> None:
         if status_callback:

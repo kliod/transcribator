@@ -1,6 +1,8 @@
 
 {
   "engine": "faster-whisper",
+  "device": "cpu",
+  "diarization_device": "cpu",
   "model": "small",
   "language": null,
   "output_formats": "all",

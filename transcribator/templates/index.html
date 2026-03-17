@@ -1,9 +1,9 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="{{ ui_lang }}">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Transcribator</title>
+  <title>{{ ui.page_title }}</title>
   <style>
     :root {
       --bg: #f3efe4;
@@ -13,7 +13,11 @@
       --muted: #6d6256;
       --accent: #166534;
       --accent-soft: rgba(22, 101, 52, 0.08);
+      --warn: #a16207;
+      --warn-soft: rgba(202, 138, 4, 0.1);
       --danger: #b42318;
+      --danger-soft: rgba(180, 35, 24, 0.06);
+      --success-soft: rgba(22, 101, 52, 0.08);
       --shadow: 0 24px 60px rgba(46, 36, 24, 0.12);
       --radius: 24px;
     }
@@ -51,6 +55,14 @@
 
     .hero {
       padding: 28px;
+    }
+
+    .hero-top {
+      display: flex;
+      justify-content: space-between;
+      gap: 16px;
+      align-items: flex-start;
+      margin-bottom: 18px;
     }
 
     h1 {
@@ -157,6 +169,13 @@
     .badge.failed {
       background: rgba(180, 35, 24, 0.08);
       color: var(--danger);
+    }
+
+    .language-switch {
+      width: min(200px, 100%);
+      display: grid;
+      gap: 8px;
+      font-weight: 600;
     }
 
     .result-links {
@@ -278,23 +297,89 @@
       background: rgba(255, 255, 255, 0.8);
     }
 
-    .warning-box {
-      display: none;
-      gap: 10px;
-      padding: 14px;
+    .hint strong {
+      display: block;
+      margin-bottom: 6px;
+    }
+
+    .collapsible-note {
       border-radius: 18px;
-      border: 1px solid rgba(180, 35, 24, 0.2);
-      background: rgba(180, 35, 24, 0.06);
-      color: #6f2016;
+      border: 1px solid var(--line);
+      background: rgba(255, 255, 255, 0.82);
+      padding: 0;
+      overflow: hidden;
+    }
+
+    .collapsible-note summary {
+      list-style: none;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      padding: 14px 16px;
+      font-weight: 700;
+    }
+
+    .collapsible-note summary::-webkit-details-marker {
+      display: none;
+    }
+
+    .collapsible-note summary::after {
+      content: "+";
+      flex: 0 0 auto;
+      font-size: 1.1rem;
+      color: var(--muted);
+    }
+
+    .collapsible-note[open] summary::after {
+      content: "-";
+    }
+
+    .collapsible-note .note-body {
+      display: grid;
+      gap: 10px;
+      padding: 0 16px 16px;
+      color: var(--muted);
       line-height: 1.5;
     }
 
-    .warning-box.visible {
-      display: grid;
+    .collapsible-note.compact summary {
+      padding: 12px 14px;
+      font-size: 0.96rem;
     }
 
-    .warning-box strong {
-      color: #54140d;
+    .collapsible-note.compact .note-body {
+      padding: 0 14px 14px;
+    }
+
+    .notice-box {
+      display: none;
+    }
+
+    .notice-box.visible {
+      display: block;
+    }
+
+    .note-state-warning {
+      border-color: rgba(202, 138, 4, 0.24);
+      background: var(--warn-soft);
+      color: #713f12;
+    }
+
+    .note-state-warning summary,
+    .note-state-warning a {
+      color: #854d0e;
+    }
+
+    .note-state-success {
+      border-color: rgba(22, 101, 52, 0.22);
+      background: var(--success-soft);
+      color: #14532d;
+    }
+
+    .note-state-success summary,
+    .note-state-success a {
+      color: #166534;
     }
 
     .repo-list {
@@ -304,6 +389,74 @@
 
     .repo-list li {
       margin: 2px 0;
+    }
+
+    .error-note {
+      display: none;
+      margin-top: 14px;
+      border-color: rgba(180, 35, 24, 0.24);
+      background: var(--danger-soft);
+    }
+
+    .error-note.visible {
+      display: block;
+    }
+
+    .confirm-box {
+      display: none;
+      margin-top: 14px;
+      border-color: rgba(202, 138, 4, 0.24);
+      background: var(--warn-soft);
+    }
+
+    .confirm-box.visible {
+      display: block;
+    }
+
+    .confirm-actions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      margin-top: 6px;
+    }
+
+    .secondary-button {
+      background: #fff;
+      color: var(--ink);
+      border: 1px solid var(--line);
+      box-shadow: none;
+    }
+
+    .toggle {
+      display: flex;
+      align-items: flex-start;
+      gap: 12px;
+      padding: 14px;
+      border: 1px solid var(--line);
+      border-radius: 18px;
+      background: rgba(255, 255, 255, 0.8);
+      font-weight: 600;
+    }
+
+    .toggle input {
+      width: auto;
+      margin: 4px 0 0;
+      accent-color: var(--accent);
+    }
+
+    .toggle-copy {
+      display: grid;
+      gap: 4px;
+    }
+
+    .toggle-copy strong {
+      font-size: 1rem;
+    }
+
+    .toggle-copy span {
+      color: var(--muted);
+      font-weight: 400;
+      line-height: 1.45;
     }
 
     @media (max-width: 640px) {
@@ -316,6 +469,10 @@
       .panel {
         padding: 18px;
         border-radius: 20px;
+      }
+
+      .hero-top {
+        flex-direction: column;
       }
     }
 
@@ -330,23 +487,40 @@
   </style>
 </head>
 <body>
+  {% set pyannote_visible = defaults.speakers == "pyannote" %}
+  {% set pyannote_has_token = defaults.hf_token %}
   <main>
     <section class="hero">
-      <div class="badge">Local CPU transcription</div>
-      <h1>Transcribe one file with a faster local pipeline.</h1>
-      <p>Upload a video, pick a quality mode, and let the app generate TXT, SRT, and VTT in one local run.</p>
+      <div class="hero-top">
+        <div class="badge">{{ ui.hero_badge }}</div>
+        <label class="language-switch" for="ui-language-select">
+          {{ ui.interface_language }}
+          <select id="ui-language-select">
+            {% for language_code in ui_language_choices %}
+            <option value="{{ language_code }}" {% if ui_lang == language_code %}selected{% endif %}>
+              {{ ui["lang_" + language_code] }}
+            </option>
+            {% endfor %}
+          </select>
+        </label>
+      </div>
+      <h1>{{ ui.hero_title }}</h1>
+      <p>{{ ui.hero_subtitle }}</p>
     </section>
 
     <section class="grid">
       <div class="panel">
         <form id="job-form">
+          <input type="hidden" name="ui_language" id="ui-language" value="{{ ui_lang }}">
+          <input type="hidden" name="allow_unavailable_diarization_cuda" id="allow-unavailable-diarization-cuda" value="false">
+
           <label>
-            File
+            {{ ui.file_label }}
             <input id="file" name="file" type="file" accept="{{ accept_extensions }}" required>
           </label>
 
           <label>
-            Model
+            {{ ui.model_label }}
             <select id="model" name="model">
               {% for model_name in model_choices %}
               {% set info = model_info[model_name] %}
@@ -358,107 +532,226 @@
           </label>
 
           <label>
-            Language
-            <input id="language" name="language" type="text" value="{{ defaults.language }}" placeholder="auto">
+            {{ ui.transcription_language_label }}
+            <input id="language" name="language" type="text" value="{{ defaults.language }}" placeholder="{{ ui.transcription_language_placeholder }}">
           </label>
 
           <label>
-            Quality
+            {{ ui.quality_label }}
             <select id="quality" name="quality">
-              <option value="balanced" {% if defaults.quality == "balanced" %}selected{% endif %}>Balanced</option>
-              <option value="high" {% if defaults.quality == "high" %}selected{% endif %}>High</option>
+              <option value="balanced" {% if defaults.quality == "balanced" %}selected{% endif %}>{{ ui.quality_balanced }}</option>
+              <option value="high" {% if defaults.quality == "high" %}selected{% endif %}>{{ ui.quality_high }}</option>
             </select>
           </label>
 
           <label>
-            Speakers
+            {{ ui.speakers_label }}
             <select id="speakers" name="speakers">
-              <option value="off" {% if defaults.speakers == "off" %}selected{% endif %}>Off</option>
-              <option value="simple" {% if defaults.speakers == "simple" %}selected{% endif %}>Simple</option>
-              <option value="pyannote" {% if defaults.speakers == "pyannote" %}selected{% endif %}>Pyannote</option>
+              <option value="off" {% if defaults.speakers == "off" %}selected{% endif %}>{{ ui.speakers_off }}</option>
+              <option value="simple" {% if defaults.speakers == "simple" %}selected{% endif %}>{{ ui.speakers_simple }}</option>
+              <option value="pyannote" {% if defaults.speakers == "pyannote" %}selected{% endif %}>{{ ui.speakers_pyannote }}</option>
             </select>
+          </label>
+
+          <label class="toggle" for="keep-timestamps">
+            <input
+              id="keep-timestamps"
+              name="keep_timestamps"
+              type="checkbox"
+              value="true"
+              {% if defaults.keep_timestamps %}checked{% endif %}
+            >
+            <span class="toggle-copy">
+              <strong>{{ ui.keep_timestamps_title }}</strong>
+              <span>{{ ui.keep_timestamps_help }}</span>
+            </span>
           </label>
 
           <label id="hf-token-wrap" style="display:none;">
-            Hugging Face Token
+            {{ ui.hf_token_label }}
             <input
               id="hf-token"
               name="hf_token"
               type="password"
               value="{{ defaults.hf_token }}"
-              placeholder="hf_..."
+              placeholder="{{ ui.hf_token_placeholder }}"
               autocomplete="off"
             >
           </label>
 
-          <div id="pyannote-warning" class="warning-box" aria-live="polite">
-            <strong>Не забудьте перед использованием раздать разрешения на модели pyannote в Hugging Face.</strong>
-            <div>
-              Нужен access token и принятые условия доступа для этих репозиториев:
+          <details id="pyannote-warning" class="notice-box collapsible-note compact {% if pyannote_visible %}visible{% endif %} {% if pyannote_has_token %}note-state-success{% else %}note-state-warning{% endif %}" aria-live="polite">
+            <summary id="pyannote-summary-text">{{ ui.pyannote_summary }}</summary>
+            <div class="note-body">
+              <div id="pyannote-status-text">
+                {% if pyannote_has_token %}
+                {{ ui.pyannote_status_ready }}
+                {% else %}
+                {{ ui.pyannote_status_missing }}
+                {% endif %}
+              </div>
+              <div>{{ ui.pyannote_intro }}</div>
+              <ul class="repo-list">
+                {% for repo_name in pyannote_access_repositories %}
+                <li>
+                  <a href="https://huggingface.co/{{ repo_name }}" target="_blank" rel="noreferrer">
+                    <code>{{ repo_name }}</code>
+                  </a>
+                </li>
+                {% endfor %}
+              </ul>
+              <div>{{ ui.pyannote_token_help }}</div>
             </div>
-            <ul class="repo-list">
-              {% for repo_name in pyannote_access_repositories %}
-              <li><code>{{ repo_name }}</code></li>
-              {% endfor %}
-            </ul>
-            <div>
-              Этот токен будет использоваться для обращений к Hugging Face и обычно убирает предупреждение про unauthenticated requests.
-            </div>
-          </div>
+          </details>
 
           <details>
-            <summary>Advanced</summary>
+            <summary>{{ ui.advanced_summary }}</summary>
             <div class="hint-list">
               <label>
-                Engine
+                {{ ui.acceleration_label }}
+                <select id="device" name="device">
+                  {% for device in device_choices %}
+                  <option
+                    value="{{ device }}"
+                    {% if defaults.device == device %}selected{% endif %}
+                    {% if device == "cuda" and not runtime_info.faster_whisper_cuda_available %}disabled{% endif %}
+                  >
+                    {% if device == "cpu" %}{{ ui.device_cpu }}{% elif device == "cuda" %}{{ ui.device_cuda }}{% else %}{{ ui.device_auto }}{% endif %}
+                  </option>
+                  {% endfor %}
+                </select>
+              </label>
+              <details class="hint collapsible-note compact">
+                <summary>
+                  {% if runtime_info.faster_whisper_cuda_available %}
+                  {{ ui.cuda_available_summary }}
+                  {% else %}
+                  {{ ui.cuda_unavailable_summary }}
+                  {% endif %}
+                </summary>
+                <div class="note-body">
+                  {% if runtime_info.faster_whisper_cuda_available %}
+                  <p class="muted">{{ tr("cuda_detected_devices", count=runtime_info.faster_whisper_cuda_device_count) }}</p>
+                  {% else %}
+                  {% if runtime_info.faster_whisper_cuda_runtime_error %}
+                  <p class="muted">{{ tr("cuda_runtime_failed", message=runtime_info.faster_whisper_cuda_runtime_error) }}</p>
+                  {% endif %}
+                  {% if runtime_info.faster_whisper_cuda_runtime_guidance %}
+                  <p class="muted">{{ runtime_info.faster_whisper_cuda_runtime_guidance }}</p>
+                  <p class="muted">
+                    {{ ui.cuda_install_hint }}
+                    <a href="{{ cuda_toolkit_url }}" target="_blank" rel="noreferrer">{{ cuda_toolkit_url }}</a>
+                  </p>
+                  {% endif %}
+                  {% endif %}
+                  <p class="muted" id="device-note">{{ ui.device_note_faster }}</p>
+                </div>
+              </details>
+              <div id="diarization-device-wrap" style="display:none;">
+                <label>
+                  {{ ui.diarization_acceleration_label }}
+                  <select id="diarization-device" name="diarization_device">
+                    {% for device in device_choices %}
+                    <option value="{{ device }}" {% if defaults.diarization_device == device %}selected{% endif %}>
+                      {% if device == "cpu" %}{{ ui.device_cpu }}{% elif device == "cuda" %}{{ ui.device_cuda }}{% else %}{{ ui.device_auto }}{% endif %}
+                    </option>
+                    {% endfor %}
+                  </select>
+                </label>
+                <details id="pyannote-gpu-status" class="hint collapsible-note compact">
+                  <summary>
+                    {% if runtime_info.pyannote_gpu_available %}
+                    {{ ui.pyannote_gpu_available_summary }}
+                    {% else %}
+                    {{ ui.pyannote_gpu_unavailable_summary }}
+                    {% endif %}
+                  </summary>
+                  <div class="note-body">
+                    {% if runtime_info.pyannote_gpu_available %}
+                    <p class="muted">{{ tr("pyannote_gpu_detected_devices", count=runtime_info.pyannote_torch_device_count) }}</p>
+                    {% else %}
+                    {% if runtime_info.pyannote_runtime_error %}
+                    <p class="muted">{{ tr("pyannote_gpu_runtime_failed", message=runtime_info.pyannote_runtime_error) }}</p>
+                    {% endif %}
+                    <p class="muted">{{ runtime_info.pyannote_runtime_guidance }}</p>
+                    {% endif %}
+                    <p class="muted">{{ ui.diarization_device_note }}</p>
+                  </div>
+                </details>
+              </div>
+              <label>
+                {{ ui.engine_label }}
                 <select id="engine" name="engine">
                   {% for engine in engine_choices %}
                   <option value="{{ engine }}" {% if defaults.engine == engine %}selected{% endif %}>{{ engine }}</option>
                   {% endfor %}
                 </select>
               </label>
-              <p class="muted">`faster-whisper` is the default CPU path. `openai-whisper` stays available as a fallback.</p>
+              <p class="muted">{{ ui.engine_help }}</p>
             </div>
           </details>
 
-          <button id="submit-button" type="submit">Start Transcription</button>
-          <p class="status-note" id="submit-note">Only one local job runs at a time.</p>
+          <button id="submit-button" type="submit">{{ ui.button_start }}</button>
+          <p class="status-note" id="submit-note">{{ ui.submit_note_idle }}</p>
         </form>
       </div>
 
       <div class="panel">
-        <div id="job-status" class="badge">Idle</div>
-        <p class="status-note" id="job-message">Waiting for a file.</p>
+        <div id="job-status" class="badge">{{ ui.status_idle }}</div>
+        <p class="status-note" id="job-message">{{ ui.message_waiting }}</p>
         <div class="progress-wrap">
           <div class="progress-meta">
-            <span id="progress-label">Progress</span>
+            <span id="progress-label">{{ ui.progress_label }}</span>
             <strong id="progress-value">0%</strong>
           </div>
           <div class="progress-track" aria-hidden="true">
             <div id="progress-fill" class="progress-fill"></div>
           </div>
           <div class="progress-stages" id="progress-stages">
-            <span data-stage="queued">Queued</span>
-            <span data-stage="running">ASR</span>
-            <span data-stage="diarizing">Speakers</span>
-            <span data-stage="exporting">Export</span>
-            <span data-stage="done">Ready</span>
+            <span data-stage="queued">{{ ui.stage_queued }}</span>
+            <span data-stage="running">{{ ui.stage_running }}</span>
+            <span data-stage="diarizing">{{ ui.stage_diarizing }}</span>
+            <span data-stage="exporting">{{ ui.stage_exporting }}</span>
+            <span data-stage="done">{{ ui.stage_done }}</span>
           </div>
         </div>
-        <div id="error-box" class="muted" style="display:none; margin-top:14px;"></div>
+        <details id="error-box" class="error-note collapsible-note compact">
+          <summary>{{ ui.job_error_summary }}</summary>
+          <div class="note-body">
+            <div id="error-text" class="muted"></div>
+          </div>
+        </details>
+        <details id="confirm-box" class="confirm-box collapsible-note compact">
+          <summary id="confirm-title">{{ ui.confirmation_title }}</summary>
+          <div class="note-body">
+            <div id="confirm-text" class="muted"></div>
+            <div class="confirm-actions">
+              <button id="confirm-switch-button" type="button">{{ ui.confirmation_switch_cpu }}</button>
+              <button id="confirm-proceed-button" type="button" class="secondary-button">{{ ui.confirmation_try_anyway }}</button>
+              <button id="confirm-cancel-button" type="button" class="secondary-button">{{ ui.confirmation_cancel }}</button>
+            </div>
+          </div>
+        </details>
         <div id="links-box" class="result-links"></div>
-        <pre id="preview-box">Preview will appear here after the first completed run.</pre>
+        <pre id="preview-box">{{ ui.preview_placeholder }}</pre>
       </div>
     </section>
   </main>
 
   <script>
+    const ui = {{ ui | tojson }};
     const form = document.getElementById("job-form");
     const submitButton = document.getElementById("submit-button");
     const submitNote = document.getElementById("submit-note");
     const statusBadge = document.getElementById("job-status");
     const statusMessage = document.getElementById("job-message");
     const errorBox = document.getElementById("error-box");
+    const errorText = document.getElementById("error-text");
+    const confirmBox = document.getElementById("confirm-box");
+    const confirmTitle = document.getElementById("confirm-title");
+    const confirmText = document.getElementById("confirm-text");
+    const confirmSwitchButton = document.getElementById("confirm-switch-button");
+    const confirmProceedButton = document.getElementById("confirm-proceed-button");
+    const confirmCancelButton = document.getElementById("confirm-cancel-button");
     const linksBox = document.getElementById("links-box");
     const previewBox = document.getElementById("preview-box");
     const progressFill = document.getElementById("progress-fill");
@@ -466,30 +759,67 @@
     const progressLabel = document.getElementById("progress-label");
     const progressStages = document.querySelectorAll("#progress-stages [data-stage]");
     const speakersSelect = document.getElementById("speakers");
+    const engineSelect = document.getElementById("engine");
+    const deviceSelect = document.getElementById("device");
+    const deviceNote = document.getElementById("device-note");
+    const diarizationDeviceWrap = document.getElementById("diarization-device-wrap");
+    const diarizationDeviceSelect = document.getElementById("diarization-device");
     const hfTokenWrap = document.getElementById("hf-token-wrap");
     const hfTokenInput = document.getElementById("hf-token");
     const pyannoteWarning = document.getElementById("pyannote-warning");
+    const pyannoteStatusText = document.getElementById("pyannote-status-text");
+    const allowUnavailableDiarizationCudaInput = document.getElementById("allow-unavailable-diarization-cuda");
+    const uiLanguageInput = document.getElementById("ui-language");
+    const uiLanguageSelect = document.getElementById("ui-language-select");
 
     let activeJobId = null;
     let pollTimer = null;
 
     function setBusy(isBusy) {
       submitButton.disabled = isBusy;
-      submitButton.textContent = isBusy ? "Working..." : "Start Transcription";
+      submitButton.textContent = isBusy ? ui.button_working : ui.button_start;
     }
 
     function syncPyannoteControls() {
       const needsToken = speakersSelect.value === "pyannote";
+      const hasToken = hfTokenInput.value.trim().length > 0;
+
       hfTokenWrap.style.display = needsToken ? "grid" : "none";
+      diarizationDeviceWrap.style.display = needsToken ? "grid" : "none";
       hfTokenInput.required = needsToken;
       pyannoteWarning.classList.toggle("visible", needsToken);
+      pyannoteWarning.classList.toggle("note-state-warning", needsToken && !hasToken);
+      pyannoteWarning.classList.toggle("note-state-success", needsToken && hasToken);
+      pyannoteStatusText.textContent = hasToken ? ui.pyannote_status_ready : ui.pyannote_status_missing;
+
+      if (needsToken && !hasToken) {
+        pyannoteWarning.open = true;
+      }
+    }
+
+    function hideConfirmation() {
+      confirmBox.classList.remove("visible");
+      confirmText.textContent = "";
+      confirmBox.open = false;
+    }
+
+    function setAllowUnavailableDiarizationCuda(enabled) {
+      allowUnavailableDiarizationCudaInput.value = enabled ? "true" : "false";
+    }
+
+    function syncDeviceControls() {
+      const isOpenAiWhisper = engineSelect.value === "openai-whisper";
+      if (isOpenAiWhisper && deviceSelect.value === "cuda") {
+        deviceSelect.value = "cpu";
+      }
+      deviceNote.textContent = isOpenAiWhisper ? ui.device_note_openai : ui.device_note_faster;
     }
 
     function renderStatus(payload) {
-      statusBadge.textContent = payload.status || "unknown";
+      statusBadge.textContent = payload.status_label || payload.status || ui.status_idle;
       statusBadge.classList.toggle("failed", payload.status === "failed");
       statusMessage.textContent = payload.message || "";
-      progressLabel.textContent = payload.message || "Progress";
+      progressLabel.textContent = payload.message || ui.progress_label;
 
       const progress = Number.isFinite(payload.progress) ? payload.progress : 0;
       progressFill.style.width = `${Math.max(0, Math.min(100, progress))}%`;
@@ -502,11 +832,17 @@
       });
 
       if (payload.error) {
-        errorBox.style.display = "block";
-        errorBox.textContent = payload.error;
+        errorBox.classList.add("visible");
+        errorText.textContent = payload.error;
+        errorBox.open = false;
       } else {
-        errorBox.style.display = "none";
-        errorBox.textContent = "";
+        errorBox.classList.remove("visible");
+        errorText.textContent = "";
+        errorBox.open = false;
+      }
+
+      if (!payload.error) {
+        hideConfirmation();
       }
 
       linksBox.innerHTML = "";
@@ -514,7 +850,8 @@
         Object.entries(payload.downloads).forEach(([format, url]) => {
           const link = document.createElement("a");
           link.href = url;
-          link.textContent = `Download ${format.toUpperCase()}`;
+          link.textContent = `${ui.download_prefix} ${format.toUpperCase()}`;
+          link.setAttribute("download", "");
           linksBox.appendChild(link);
         });
       }
@@ -542,7 +879,8 @@
       } catch (error) {
         renderStatus({
           status: "failed",
-          message: "Polling failed",
+          status_label: ui.status_failed,
+          message: ui.polling_failed,
           error: error.message,
           progress: 100,
           active: false
@@ -562,12 +900,15 @@
       }
 
       setBusy(true);
-      submitNote.textContent = "Uploading and starting the local job...";
-      errorBox.style.display = "none";
-      errorBox.textContent = "";
+      submitNote.textContent = ui.submit_note_uploading;
+      errorBox.classList.remove("visible");
+      errorText.textContent = "";
+      errorBox.open = false;
+      hideConfirmation();
       linksBox.innerHTML = "";
 
       const payload = new FormData(form);
+      setAllowUnavailableDiarizationCuda(false);
 
       try {
         const response = await fetch("/jobs", {
@@ -578,18 +919,32 @@
         const body = await response.json();
         if (!response.ok) {
           const detail = body.detail || {};
-          throw new Error(detail.message || body.detail || "Could not start transcription.");
+          if (detail.confirmation_required) {
+            setBusy(false);
+            confirmBox.classList.add("visible");
+            confirmTitle.textContent = detail.confirmation_title || ui.confirmation_title;
+            confirmText.textContent = detail.message || ui.pyannote_gpu_install_hint;
+            confirmSwitchButton.textContent = detail.switch_label || ui.confirmation_switch_cpu;
+            confirmProceedButton.textContent = detail.proceed_label || ui.confirmation_try_anyway;
+            confirmCancelButton.textContent = detail.cancel_label || ui.confirmation_cancel;
+            confirmSwitchButton.dataset.suggestedDevice = detail.suggested_diarization_device || "cpu";
+            confirmBox.open = true;
+            submitNote.textContent = ui.submit_note_idle;
+            return;
+          }
+          throw new Error(detail.message || body.detail || ui.could_not_start_transcription);
         }
 
         activeJobId = body.job_id;
         renderStatus(body);
-        submitNote.textContent = `Active job: ${body.job_id}`;
+        submitNote.textContent = `${ui.submit_note_active}: ${body.job_id}`;
         pollJob(body.job_id);
       } catch (error) {
         setBusy(false);
         renderStatus({
           status: "failed",
-          message: "Could not start job",
+          status_label: ui.status_failed,
+          message: ui.could_not_start_job,
           error: error.message,
           progress: 100,
           active: false
@@ -597,8 +952,31 @@
       }
     });
 
+    uiLanguageSelect.addEventListener("change", () => {
+      const url = new URL(window.location.href);
+      url.searchParams.set("ui_lang", uiLanguageSelect.value);
+      window.location.assign(url.toString());
+    });
+
     speakersSelect.addEventListener("change", syncPyannoteControls);
+    hfTokenInput.addEventListener("input", syncPyannoteControls);
+    engineSelect.addEventListener("change", syncDeviceControls);
+    confirmSwitchButton.addEventListener("click", () => {
+      setAllowUnavailableDiarizationCuda(false);
+      diarizationDeviceSelect.value = confirmSwitchButton.dataset.suggestedDevice || "cpu";
+      hideConfirmation();
+      form.requestSubmit();
+    });
+    confirmProceedButton.addEventListener("click", () => {
+      setAllowUnavailableDiarizationCuda(true);
+      hideConfirmation();
+      form.requestSubmit();
+    });
+    confirmCancelButton.addEventListener("click", hideConfirmation);
+    uiLanguageInput.value = uiLanguageSelect.value;
+    setAllowUnavailableDiarizationCuda(false);
     syncPyannoteControls();
+    syncDeviceControls();
   </script>
 </body>
 </html>
