@@ -15,18 +15,29 @@ setup(
     long_description_content_type="text/markdown",
     author="",
     packages=find_packages(),
+    include_package_data=True,
+    package_data={
+        "transcribator": ["templates/*.html"],
+    },
     install_requires=[
-        "openai-whisper>=20231117",
+        "openai-whisper>=20240930",
+        "faster-whisper>=1.2.1",
+        "ctranslate2>=4.7.0",
         "click>=8.0.0",
         "tqdm>=4.66.0",
         "librosa>=0.10.0",
         "scipy>=1.10.0",
         "numpy>=1.24.0",
+        "fastapi>=0.128.0",
+        "uvicorn>=0.40.0",
+        "jinja2>=3.1.0",
+        "python-multipart>=0.0.20",
     ],
     python_requires=">=3.8",
     entry_points={
         "console_scripts": [
             "transcribator=transcribator.cli:main",
+            "transcribator-web=transcribator.webapp:main",
         ],
     },
     classifiers=[
