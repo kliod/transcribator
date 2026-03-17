@@ -30,6 +30,9 @@ class TranscriptionRequest:
     input_path: str
     model: str = "small"
     engine: str = "faster-whisper"
+    device: str = "cpu"
+    diarization_device: str = "cpu"
+    ui_language: str = "en"
     language: Optional[str] = None
     output_formats: List[str] = field(default_factory=lambda: list(DEFAULT_OUTPUT_FORMATS))
     output_dir: Optional[str] = None
@@ -60,6 +63,24 @@ class TranscriptionRequest:
         if mode == "off":
             return "none"
         return mode
+
+    def normalized_device(self) -> str:
+        device = (self.device or "cpu").lower()
+        if device not in {"cpu", "cuda", "auto"}:
+            return "cpu"
+        return device
+
+    def normalized_diarization_device(self) -> str:
+        device = (self.diarization_device or "cpu").lower()
+        if device not in {"cpu", "cuda", "auto"}:
+            return "cpu"
+        return device
+
+    def normalized_ui_language(self) -> str:
+        language = (self.ui_language or "en").lower()
+        if language not in {"en", "ru"}:
+            return "en"
+        return language
 
 
 @dataclass

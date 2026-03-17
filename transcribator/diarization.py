@@ -1,522 +1,430 @@
-"""Модуль для разбивки транскрипции по спикерам (speaker diarization)."""
+"""Speaker diarization utilities."""
 
-from typing import List, Dict, Optional, Tuple
-from pathlib import Path
+from __future__ import annotations
+
 import warnings
+from collections import defaultdict
+from typing import Dict, List, Optional, Tuple
+
 import numpy as np
 
-# Подавляем предупреждения от pyannote.audio и torchcodec глобально
-warnings.filterwarnings("ignore", category=UserWarning, module='pyannote.audio')
-warnings.filterwarnings("ignore", category=UserWarning, module='torchcodec')
+
+warnings.filterwarnings("ignore", category=UserWarning, module="pyannote.audio")
+warnings.filterwarnings("ignore", category=UserWarning, module="pyannote.audio.core.io")
+warnings.filterwarnings("ignore", category=UserWarning, module="torchcodec")
 warnings.filterwarnings("ignore", message=".*torchcodec.*", category=UserWarning)
+warnings.filterwarnings(
+    "ignore",
+    message="torchcodec is not installed correctly.*",
+    category=UserWarning,
+)
 warnings.filterwarnings("ignore", message=".*std\\(\\): degrees of freedom.*", category=UserWarning)
 warnings.filterwarnings("ignore", message=".*degrees of freedom.*", category=UserWarning)
 
+DIARIZATION_DEVICE_CHOICES = ("cpu", "cuda", "auto")
+PYANNOTE_GPU_GUIDANCE = (
+    "Pyannote GPU mode requires a CUDA-enabled torch/torchaudio installation. "
+    "Keep the default CPU setup or install the optional GPU profile described in docs/pyannote-gpu.md."
+)
+
+
+def get_pyannote_runtime_info() -> Dict[str, object]:
+    info: Dict[str, object] = {
+        "pyannote_available": False,
+        "pyannote_gpu_available": False,
+        "pyannote_torch_installed": False,
+        "pyannote_torchaudio_available": False,
+        "pyannote_torch_cuda_available": False,
+        "pyannote_torch_device_count": 0,
+        "pyannote_runtime_guidance": PYANNOTE_GPU_GUIDANCE,
+    }
+
+    try:
+        import pyannote.audio  # noqa: F401
+
+        info["pyannote_available"] = True
+    except Exception as exc:
+        info["pyannote_error"] = str(exc)
+
+    try:
+        import torch
+
+        info["pyannote_torch_installed"] = True
+        info["pyannote_torch_version"] = torch.__version__
+        info["pyannote_torch_cuda_available"] = bool(torch.cuda.is_available())
+        info["pyannote_torch_device_count"] = int(torch.cuda.device_count())
+    except Exception as exc:
+        info["pyannote_torch_error"] = str(exc)
+
+    try:
+        import torchaudio  # noqa: F401
+
+        info["pyannote_torchaudio_available"] = True
+    except Exception as exc:
+        info["pyannote_torchaudio_error"] = str(exc)
+
+    info["pyannote_gpu_available"] = bool(
+        info["pyannote_available"]
+        and info["pyannote_torch_installed"]
+        and info["pyannote_torchaudio_available"]
+        and info["pyannote_torch_cuda_available"]
+        and int(info["pyannote_torch_device_count"]) > 0
+    )
+
+    if not info["pyannote_available"]:
+        info["pyannote_runtime_error"] = (
+            "pyannote.audio is not installed. Install pyannote.audio to use speaker diarization."
+        )
+    elif not info["pyannote_torch_installed"]:
+        info["pyannote_runtime_error"] = "torch is not installed."
+    elif not info["pyannote_torchaudio_available"]:
+        info["pyannote_runtime_error"] = "torchaudio is not installed or cannot be imported."
+    elif not info["pyannote_torch_cuda_available"]:
+        info["pyannote_runtime_error"] = (
+            "Current torch build does not expose CUDA. Install a CUDA-enabled torch/torchaudio build."
+        )
+
+    return info
+
 
 class SpeakerDiarizer:
-    """Класс для разбивки транскрипции по спикерам."""
-    
+    """Assign speaker labels to transcription segments."""
+
     def __init__(
         self,
-        method: str = 'simple',
+        method: str = "simple",
         pause_threshold: float = 2.0,
         min_speakers: Optional[int] = None,
         max_speakers: Optional[int] = None,
-        clustering_threshold: Optional[float] = None
+        clustering_threshold: Optional[float] = None,
+        device: str = "cpu",
     ):
-        """
-        Инициализирует диаризатор.
-        
-        Args:
-            method: Метод диаризации ('simple', 'pyannote', 'auto')
-            pause_threshold: Порог паузы в секундах для простого метода
-            min_speakers: Минимальное количество спикеров для pyannote (опционально)
-            max_speakers: Максимальное количество спикеров для pyannote (опционально)
-            clustering_threshold: Порог кластеризации для pyannote (0.0-1.0, по умолчанию 0.7)
-        """
-        self.method = method
+        self.method = method.lower()
         self.pause_threshold = pause_threshold
         self.min_speakers = min_speakers
         self.max_speakers = max_speakers
         self.clustering_threshold = clustering_threshold if clustering_threshold is not None else 0.7
+        self.requested_device = self._normalize_device(device)
+        self.resolved_device = "cpu"
         self.pyannote_available = False
-        
-        # Проверяем доступность pyannote
-        if method in ('pyannote', 'auto'):
-            try:
-                import pyannote.audio
-                self.pyannote_available = True
-            except ImportError:
-                self.pyannote_available = False
-                if method == 'pyannote':
-                    warnings.warn(
-                        "pyannote.audio не установлен. Используйте 'pip install pyannote.audio' "
-                        "для более точной разбивки по спикерам. Используется простой метод.",
-                        UserWarning
-                    )
-    
+        self.runtime_info = get_pyannote_runtime_info()
+
+        if self.method in {"pyannote", "auto"}:
+            self.pyannote_available = bool(self.runtime_info.get("pyannote_available"))
+
+    def _normalize_device(self, device: str) -> str:
+        normalized = (device or "cpu").lower()
+        if normalized not in DIARIZATION_DEVICE_CHOICES:
+            return "cpu"
+        return normalized
+
+    def _resolve_pyannote_device(self) -> str:
+        requested_device = self.requested_device
+        gpu_available = bool(self.runtime_info.get("pyannote_gpu_available"))
+
+        if requested_device == "auto":
+            self.resolved_device = "cuda" if gpu_available else "cpu"
+            return self.resolved_device
+
+        if requested_device == "cuda":
+            if not gpu_available:
+                runtime_error = self.runtime_info.get("pyannote_runtime_error")
+                guidance = self.runtime_info.get("pyannote_runtime_guidance")
+                if runtime_error and guidance:
+                    raise RuntimeError(f"{runtime_error} {guidance}")
+                if runtime_error:
+                    raise RuntimeError(str(runtime_error))
+                raise RuntimeError(PYANNOTE_GPU_GUIDANCE)
+            self.resolved_device = "cuda"
+            return self.resolved_device
+
+        self.resolved_device = "cpu"
+        return self.resolved_device
+
     def diarize_simple(self, segments: List[Dict]) -> List[Dict]:
-        """
-        Улучшенный простой метод разбивки по спикерам на основе пауз между сегментами.
-        
-        Этот метод анализирует паузы между сегментами Whisper и группирует
-        сегменты по временным интервалам, предполагая что длинные паузы
-        означают смену спикера. Использует динамический порог паузы и анализ
-        длины сегментов для улучшения точности.
-        
-        Args:
-            segments: Список сегментов с ключами 'start', 'end', 'text'
-        
-        Returns:
-            Список сегментов с добавленным ключом 'speaker' (0, 1, 2, ...)
-        """
+        """Approximate diarization by switching speakers on larger pauses."""
+        self.resolved_device = "cpu"
         if not segments:
             return []
-        
-        # Вычисляем статистику пауз для динамического порога
+
         pauses = []
-        segment_durations = []
-        for i in range(1, len(segments)):
-            pause = segments[i]['start'] - segments[i - 1]['end']
+        for index in range(1, len(segments)):
+            pause = float(segments[index]["start"]) - float(segments[index - 1]["end"])
             if pause > 0:
                 pauses.append(pause)
-            segment_durations.append(segments[i - 1]['end'] - segments[i - 1]['start'])
-        
-        # Добавляем длительность последнего сегмента
-        if segments:
-            segment_durations.append(segments[-1]['end'] - segments[-1]['start'])
-        
-        # Динамический порог: медиана пауз + стандартное отклонение
-        # Это адаптируется к характеристикам конкретного аудио
+
         if pauses:
-            pause_median = np.median(pauses)
-            pause_std = np.std(pauses) if len(pauses) > 1 else pause_median * 0.5
-            dynamic_threshold = pause_median + pause_std
-            # Используем максимум из заданного порога и динамического
-            effective_threshold = max(self.pause_threshold, dynamic_threshold)
+            pause_median = float(np.median(pauses))
+            pause_std = float(np.std(pauses)) if len(pauses) > 1 else pause_median * 0.5
+            threshold = max(self.pause_threshold, pause_median + pause_std)
         else:
-            effective_threshold = self.pause_threshold
-        
-        # Вычисляем среднюю длину сегмента для анализа
-        avg_segment_duration = np.mean(segment_durations) if segment_durations else 3.0
-        
-        diarized_segments = []
+            threshold = self.pause_threshold
+
+        diarized_segments: List[Dict] = []
         current_speaker = 0
-        
-        for i, segment in enumerate(segments):
+
+        for index, segment in enumerate(segments):
             segment_copy = segment.copy()
-            segment_duration = segment['end'] - segment['start']
-            
-            # Для первого сегмента всегда спикер 0
-            if i == 0:
-                segment_copy['speaker'] = current_speaker
-            else:
-                # Вычисляем паузу между текущим и предыдущим сегментом
-                prev_end = segments[i - 1]['end']
-                curr_start = segment['start']
-                pause_duration = curr_start - prev_end
-                
-                # Улучшенная логика определения смены спикера:
-                # 1. Пауза больше эффективного порога
-                # 2. ИЛИ (пауза больше базового порога И предыдущий сегмент был длинным)
-                #    Длинные сегменты часто означают монолог одного спикера
-                should_switch = False
-                
-                if pause_duration >= effective_threshold:
-                    should_switch = True
-                elif pause_duration >= self.pause_threshold:
-                    # Проверяем длину предыдущего сегмента
-                    prev_duration = segments[i - 1]['end'] - segments[i - 1]['start']
-                    # Если предыдущий сегмент был длинным (больше средней длины), 
-                    # это может указывать на окончание монолога
-                    if prev_duration > avg_segment_duration * 1.5:
-                        should_switch = True
-                
-                if should_switch:
-                    current_speaker = 1 - current_speaker  # Переключаем между 0 и 1
-                
-                segment_copy['speaker'] = current_speaker
-            
+            if index > 0:
+                pause = float(segment["start"]) - float(segments[index - 1]["end"])
+                if pause >= threshold:
+                    current_speaker = 1 - current_speaker
+            segment_copy["speaker"] = current_speaker
             diarized_segments.append(segment_copy)
-        
-        return diarized_segments
-    
+
+        return self._smooth_assigned_speakers(diarized_segments)
+
     def diarize_pyannote(
-        self, 
-        audio_path: str, 
-        hf_token: Optional[str] = None
+        self,
+        audio_path: str,
+        hf_token: Optional[str] = None,
     ) -> List[Tuple[float, float, int]]:
-        """
-        Разбивка по спикерам с использованием pyannote.audio.
-        
-        Args:
-            audio_path: Путь к аудио файлу
-            hf_token: Токен Hugging Face (опционально)
-        
-        Returns:
-            Список кортежей (start, end, speaker_id) для каждого сегмента речи
-        """
+        """Run pyannote and return diarization segments as tuples."""
         if not self.pyannote_available:
             raise RuntimeError(
-                "pyannote.audio не установлен. "
-                "Установите: pip install pyannote.audio"
+                "pyannote.audio is not installed. Install pyannote.audio before using this mode."
             )
-        
+        if not hf_token:
+            raise RuntimeError("Hugging Face token is required for pyannote diarization.")
+
+        self._resolve_pyannote_device()
+
         try:
-            import warnings
-            # Подавляем все предупреждения от pyannote и torchcodec
-            # Мы используем предзагруженное аудио, поэтому torchcodec не нужен
             with warnings.catch_warnings():
                 warnings.simplefilter("ignore", UserWarning)
                 warnings.filterwarnings("ignore", message=".*torchcodec.*")
                 warnings.filterwarnings("ignore", message=".*std\\(\\): degrees of freedom.*")
                 warnings.filterwarnings("ignore", message=".*degrees of freedom.*")
                 from pyannote.audio import Pipeline
-            
-            # Загружаем pipeline для диаризации
-            # В новых версиях pyannote используется параметр 'token' вместо 'use_auth_token'
-            if hf_token:
-                try:
-                    pipeline = Pipeline.from_pretrained(
-                        "pyannote/speaker-diarization-3.1",
-                        token=hf_token
-                    )
-                except TypeError:
-                    # Fallback: пробуем старый параметр для совместимости
-                    pipeline = Pipeline.from_pretrained(
-                        "pyannote/speaker-diarization-3.1",
-                        use_auth_token=hf_token
-                    )
-            else:
-                # Пробуем использовать модель без токена
-                try:
-                    pipeline = Pipeline.from_pretrained(
-                        "pyannote/speaker-diarization-3.1"
-                    )
-                except Exception as e:
-                    # Если не получилось, пробуем альтернативную модель
-                    try:
-                        pipeline = Pipeline.from_pretrained(
-                            "pyannote/speaker-diarization"
-                        )
-                    except Exception as e2:
-                        raise RuntimeError(
-                            f"Не удалось загрузить модель диаризации. "
-                            f"Модель требует токен Hugging Face. "
-                            f"Получите токен на https://hf.co/settings/tokens и используйте --hf-token. "
-                            f"Ошибки: {e}, {e2}"
-                        )
-            
-            # Применяем диаризацию
-            # Из-за проблем с torchcodec на Windows, нужно использовать предзагруженное аудио
-            # Загружаем аудио через whisper.load_audio для совместимости
+        except Exception as exc:
+            raise RuntimeError(f"Could not import pyannote.audio pipeline: {exc}") from exc
+
+        pipeline = self._load_pipeline(Pipeline, hf_token)
+        diarization = self._run_pipeline(pipeline, audio_path)
+        raw_segments = self._extract_pyannote_segments(diarization)
+
+        if not raw_segments:
+            raise RuntimeError("pyannote returned no speaker segments.")
+
+        return self._merge_adjacent_diarization_segments(raw_segments)
+
+    def _load_pipeline(self, pipeline_class, hf_token: str):
+        last_error: Optional[Exception] = None
+        for kwargs in (
+            {"token": hf_token},
+            {"use_auth_token": hf_token},
+        ):
             try:
-                import whisper
-                audio_data = whisper.load_audio(audio_path)
-                # Преобразуем в формат, который ожидает pyannote: {'waveform': tensor, 'sample_rate': int}
+                pipeline = pipeline_class.from_pretrained(
+                    "pyannote/speaker-diarization-3.1",
+                    **kwargs,
+                )
+                self._configure_pipeline(pipeline)
+                return pipeline
+            except TypeError:
+                continue
+            except Exception as exc:
+                last_error = exc
+
+        message = (
+            "Could not load pyannote speaker diarization pipeline. "
+            "Check the Hugging Face token and repository access permissions."
+        )
+        if last_error:
+            message = f"{message} Details: {last_error}"
+        raise RuntimeError(message)
+
+    def _configure_pipeline(self, pipeline) -> None:
+        if hasattr(pipeline, "instantiate"):
+            params = {}
+            if self.min_speakers is not None:
+                params["min_speakers"] = self.min_speakers
+            if self.max_speakers is not None:
+                params["max_speakers"] = self.max_speakers
+            if params:
+                try:
+                    pipeline.instantiate(params)
+                except Exception:
+                    pass
+
+        if hasattr(pipeline, "clustering") and hasattr(pipeline.clustering, "threshold"):
+            pipeline.clustering.threshold = self.clustering_threshold
+
+        if self.resolved_device == "cuda":
+            try:
                 import torch
-                # whisper.load_audio возвращает numpy array, нужно преобразовать в torch tensor
-                if not isinstance(audio_data, torch.Tensor):
-                    audio_data = torch.from_numpy(audio_data)
-                # Добавляем размерность канала если нужно: (time,) -> (1, time)
-                if audio_data.dim() == 1:
-                    audio_data = audio_data.unsqueeze(0)
-                # Получаем sample_rate (Whisper использует 16000)
-                sample_rate = 16000
-                audio_dict = {'waveform': audio_data, 'sample_rate': sample_rate}
-                
-                # Настраиваем параметры pipeline если указаны
-                if hasattr(pipeline, 'instantiate'):
-                    # Для новых версий pyannote используем instantiate для настройки параметров
-                    pipeline_params = {}
-                    if self.min_speakers is not None:
-                        pipeline_params['min_speakers'] = self.min_speakers
-                    if self.max_speakers is not None:
-                        pipeline_params['max_speakers'] = self.max_speakers
-                    if self.clustering_threshold is not None:
-                        # Порог кластеризации обычно настраивается через параметры сегментации
-                        # Пробуем найти соответствующий параметр в pipeline
-                        if hasattr(pipeline, 'segmentation'):
-                            if hasattr(pipeline.segmentation, 'threshold'):
-                                pipeline.segmentation.threshold = self.clustering_threshold
-                        if hasattr(pipeline, 'clustering'):
-                            if hasattr(pipeline.clustering, 'threshold'):
-                                pipeline.clustering.threshold = self.clustering_threshold
-                    
-                    if pipeline_params:
-                        try:
-                            pipeline.instantiate(pipeline_params)
-                        except Exception as e:
-                            warnings.warn(f"Не удалось настроить параметры pipeline: {e}")
-                
-                # Подавляем предупреждения при применении диаризации
-                with warnings.catch_warnings():
-                    warnings.simplefilter("ignore", UserWarning)
-                    warnings.filterwarnings("ignore", message=".*torchcodec.*")
-                    warnings.filterwarnings("ignore", message=".*std\\(\\): degrees of freedom.*")
-                    warnings.filterwarnings("ignore", message=".*degrees of freedom.*")
-                    diarization = pipeline(audio_dict)
-            except Exception as e:
-                # Fallback: пробуем использовать путь к файлу напрямую
-                # Подавляем предупреждения при применении диаризации
-                with warnings.catch_warnings():
-                    warnings.simplefilter("ignore", UserWarning)
-                    warnings.filterwarnings("ignore", message=".*torchcodec.*")
-                    warnings.filterwarnings("ignore", message=".*std\\(\\): degrees of freedom.*")
-                    warnings.filterwarnings("ignore", message=".*degrees of freedom.*")
-                    diarization = pipeline(audio_path)
-            
-            # Преобразуем результат в список кортежей
-            # В новых версиях pyannote API изменился - DiarizeOutput это Annotation объект
-            segments_list = []
-            try:
-                # В новых версиях pyannote DiarizeOutput это Annotation объект
-                # Используем правильный API для Annotation
-                from pyannote.core import Annotation
-                
-                # Проверяем тип объекта и доступные методы
-                diarization_type = type(diarization).__name__
-                is_annotation = isinstance(diarization, Annotation)
-                has_itertracks = hasattr(diarization, 'itertracks')
-                
-                # DiarizeOutput содержит результаты в атрибутах speaker_diarization или exclusive_speaker_diarization
-                # Пробуем извлечь Annotation из этих атрибутов
-                annotation_result = None
-                if hasattr(diarization, 'speaker_diarization'):
-                    annotation_result = diarization.speaker_diarization
-                elif hasattr(diarization, 'exclusive_speaker_diarization'):
-                    annotation_result = diarization.exclusive_speaker_diarization
-                
-                # Если нашли Annotation в атрибутах, используем его
-                if annotation_result is not None:
-                    if isinstance(annotation_result, Annotation):
-                        diarization = annotation_result
-                        is_annotation = True
-                        has_itertracks = hasattr(diarization, 'itertracks')
-                    else:
-                        # Пробуем использовать найденный атрибут как Annotation
-                        if hasattr(annotation_result, 'itertracks'):
-                            diarization = annotation_result
-                            is_annotation = isinstance(annotation_result, Annotation)
-                            has_itertracks = True
-                
-                # Пробуем разные способы итерации
-                if is_annotation or has_itertracks:
-                    try:
-                        # Пробуем itertracks с yield_label=True (новый API)
-                        try:
-                            for segment, track, speaker_label in diarization.itertracks(yield_label=True):
-                                speaker_id = int(speaker_label.split('_')[-1]) if isinstance(speaker_label, str) and '_' in speaker_label else 0
-                                segments_list.append((segment.start, segment.end, speaker_id))
-                        except (TypeError, ValueError):
-                            # Пробуем старый формат (turn, _, speaker)
-                            for turn, _, speaker in diarization.itertracks(yield_label=True):
-                                speaker_id = int(speaker.split('_')[-1]) if isinstance(speaker, str) and '_' in speaker else 0
-                                segments_list.append((turn.start, turn.end, speaker_id))
-                    except AttributeError as e:
-                        # Пробуем альтернативные методы
-                        if hasattr(diarization, 'get_timeline'):
-                            timeline = diarization.get_timeline()
-                            for segment in timeline:
-                                speaker_label = diarization[segment]
-                                speaker_id = int(speaker_label.split('_')[-1]) if isinstance(speaker_label, str) and '_' in speaker_label else 0
-                                segments_list.append((segment.start, segment.end, speaker_id))
-                        elif hasattr(diarization, 'items'):
-                            for segment, speaker_label in diarization.items():
-                                speaker_id = int(speaker_label.split('_')[-1]) if isinstance(speaker_label, str) and '_' in speaker_label else 0
-                                segments_list.append((segment.start, segment.end, speaker_id))
-                        else:
-                            raise RuntimeError(f"Не удалось обработать результат диаризации. Тип: {diarization_type}, ошибка: {e}")
-                else:
-                    # Пробуем итерацию как словарь или через другие методы
-                    if hasattr(diarization, 'get_timeline'):
-                        timeline = diarization.get_timeline()
-                        for segment in timeline:
-                            speaker_label = diarization[segment]
-                            speaker_id = int(speaker_label.split('_')[-1]) if isinstance(speaker_label, str) and '_' in speaker_label else 0
-                            segments_list.append((segment.start, segment.end, speaker_id))
-                    elif hasattr(diarization, 'items'):
-                        for segment, speaker_label in diarization.items():
-                            speaker_id = int(speaker_label.split('_')[-1]) if isinstance(speaker_label, str) and '_' in speaker_label else 0
-                            segments_list.append((segment.start, segment.end, speaker_id))
-                    else:
-                        raise RuntimeError(f"Не удалось определить API для обработки результата диаризации. Тип: {diarization_type}")
-            except Exception as e:
-                raise RuntimeError(f"Не удалось обработать результат диаризации: {e}. Тип объекта: {type(diarization)}")
-            
-            return segments_list
-            
-        except Exception as e:
-            raise RuntimeError(f"Ошибка при диаризации с pyannote: {e}")
-    
-    def _postprocess_diarization(self, segments: List[Dict], min_segment_duration: float = 0.5) -> List[Dict]:
-        """
-        Постобработка результатов диаризации для улучшения точности.
-        
-        Args:
-            segments: Список сегментов с метками спикеров
-            min_segment_duration: Минимальная длительность сегмента в секундах для фильтрации
-        
-        Returns:
-            Обработанный список сегментов
-        """
-        if not segments:
+
+                if hasattr(pipeline, "to"):
+                    pipeline.to(torch.device("cuda"))
+            except Exception as exc:
+                raise RuntimeError(f"Could not move pyannote pipeline to CUDA: {exc}") from exc
+
+    def _run_pipeline(self, pipeline, audio_path: str):
+        try:
+            import torch
+            import whisper
+
+            waveform = whisper.load_audio(audio_path)
+            if not isinstance(waveform, torch.Tensor):
+                waveform = torch.from_numpy(waveform)
+            if waveform.dim() == 1:
+                waveform = waveform.unsqueeze(0)
+            if self.resolved_device == "cuda":
+                waveform = waveform.to(torch.device("cuda"))
+
+            payload = {"waveform": waveform, "sample_rate": 16000}
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", UserWarning)
+                return pipeline(payload)
+        except Exception:
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", UserWarning)
+                return pipeline(audio_path)
+
+    def _extract_pyannote_segments(self, diarization) -> List[Tuple[float, float, int]]:
+        annotation = diarization
+        for attribute in ("exclusive_speaker_diarization", "speaker_diarization"):
+            candidate = getattr(diarization, attribute, None)
+            if candidate is not None:
+                annotation = candidate
+                break
+
+        speaker_ids: Dict[str, int] = {}
+        extracted: List[Tuple[float, float, int]] = []
+
+        if hasattr(annotation, "itertracks"):
+            for turn, _, speaker_label in annotation.itertracks(yield_label=True):
+                label_key = str(speaker_label)
+                speaker_id = speaker_ids.setdefault(label_key, len(speaker_ids))
+                extracted.append((float(turn.start), float(turn.end), speaker_id))
+            return extracted
+
+        if hasattr(annotation, "items"):
+            for turn, speaker_label in annotation.items():
+                label_key = str(speaker_label)
+                speaker_id = speaker_ids.setdefault(label_key, len(speaker_ids))
+                extracted.append((float(turn.start), float(turn.end), speaker_id))
+            return extracted
+
+        if hasattr(annotation, "get_timeline") and hasattr(annotation, "__getitem__"):
+            for turn in annotation.get_timeline():
+                speaker_label = annotation[turn]
+                label_key = str(speaker_label)
+                speaker_id = speaker_ids.setdefault(label_key, len(speaker_ids))
+                extracted.append((float(turn.start), float(turn.end), speaker_id))
+            return extracted
+
+        raise RuntimeError(f"Unsupported pyannote diarization output: {type(diarization)}")
+
+    def _merge_adjacent_diarization_segments(
+        self,
+        diarization_segments: List[Tuple[float, float, int]],
+        *,
+        max_gap: float = 0.35,
+    ) -> List[Tuple[float, float, int]]:
+        merged: List[List[float]] = []
+
+        for start, end, speaker in diarization_segments:
+            if not merged:
+                merged.append([start, end, float(speaker)])
+                continue
+
+            previous = merged[-1]
+            if int(previous[2]) == speaker and start - previous[1] <= max_gap:
+                previous[1] = max(previous[1], end)
+            else:
+                merged.append([start, end, float(speaker)])
+
+        return [(start, end, int(speaker)) for start, end, speaker in merged]
+
+    def _smooth_assigned_speakers(self, segments: List[Dict]) -> List[Dict]:
+        if len(segments) < 3:
             return segments
-        
-        # Фильтрация очень коротких сегментов
-        filtered_segments = []
-        for seg in segments:
-            duration = seg['end'] - seg['start']
-            if duration >= min_segment_duration:
-                filtered_segments.append(seg)
-            # Очень короткие сегменты пропускаем или объединяем с соседними
-        
-        if not filtered_segments:
-            return segments  # Если все сегменты были отфильтрованы, возвращаем исходные
-        
-        # Сглаживание переключений спикеров
-        # Если короткий сегмент одного спикера находится между двумя длинными сегментами другого,
-        # вероятно это ошибка - меняем спикера короткого сегмента
-        smoothed_segments = []
-        for i, seg in enumerate(filtered_segments):
-            seg_copy = seg.copy()
-            duration = seg['end'] - seg['start']
-            
-            # Проверяем соседние сегменты для сглаживания
-            if i > 0 and i < len(filtered_segments) - 1:
-                prev_seg = filtered_segments[i - 1]
-                next_seg = filtered_segments[i + 1]
-                
-                prev_duration = prev_seg['end'] - prev_seg['start']
-                next_duration = next_seg['end'] - next_seg['start']
-                
-                # Если текущий сегмент короткий, а соседние длинные и одного спикера
-                if (duration < 1.0 and 
-                    prev_duration > 2.0 and 
-                    next_duration > 2.0 and
-                    prev_seg.get('speaker') == next_seg.get('speaker') and
-                    seg.get('speaker') != prev_seg.get('speaker')):
-                    # Вероятно ошибка - меняем спикера на спикера соседних сегментов
-                    seg_copy['speaker'] = prev_seg.get('speaker', 0)
-            
-            smoothed_segments.append(seg_copy)
-        
-        return smoothed_segments
-    
+
+        smoothed = [segment.copy() for segment in segments]
+
+        for index in range(1, len(smoothed) - 1):
+            current = smoothed[index]
+            previous = smoothed[index - 1]
+            following = smoothed[index + 1]
+
+            current_speaker = current.get("speaker")
+            previous_speaker = previous.get("speaker")
+            following_speaker = following.get("speaker")
+            current_duration = float(current["end"]) - float(current["start"])
+            gap_before = float(current["start"]) - float(previous["end"])
+            gap_after = float(following["start"]) - float(current["end"])
+
+            if (
+                current_speaker is not None
+                and previous_speaker == following_speaker
+                and current_speaker != previous_speaker
+                and current_duration <= 1.2
+                and gap_before <= 0.6
+                and gap_after <= 0.6
+            ):
+                current["speaker"] = previous_speaker
+
+        return smoothed
+
     def assign_speakers_to_segments(
-        self, 
-        segments: List[Dict], 
-        diarization_result: List[Tuple[float, float, int]]
+        self,
+        segments: List[Dict],
+        diarization_result: List[Tuple[float, float, int]],
     ) -> List[Dict]:
-        """
-        Присваивает спикеров сегментам транскрипции на основе результата диаризации.
-        Использует взвешенное присвоение на основе пересечения временных интервалов.
-        
-        Args:
-            segments: Список сегментов транскрипции с 'start', 'end', 'text'
-            diarization_result: Результат диаризации - список (start, end, speaker_id)
-        
-        Returns:
-            Список сегментов с добавленным ключом 'speaker'
-        """
+        """Assign pyannote speakers to ASR segments using overlap weights."""
         if not diarization_result:
             return segments
-        
-        diarized_segments = []
-        
+
+        diarized_segments: List[Dict] = []
+
         for segment in segments:
             segment_copy = segment.copy()
-            seg_start = segment['start']
-            seg_end = segment['end']
-            
-            # Взвешенное присвоение: находим диаризационный сегмент с наибольшим пересечением
-            best_speaker = 0  # По умолчанию
-            max_overlap = 0.0
-            
+            seg_start = float(segment["start"])
+            seg_end = float(segment["end"])
+            speaker_scores = defaultdict(float)
+
             for diar_start, diar_end, speaker_id in diarization_result:
-                # Вычисляем пересечение интервалов
                 overlap_start = max(seg_start, diar_start)
                 overlap_end = min(seg_end, diar_end)
-                
-                if overlap_start < overlap_end:
-                    # Есть пересечение
-                    overlap_duration = overlap_end - overlap_start
-                    seg_duration = seg_end - seg_start
-                    
-                    # Вычисляем долю пересечения от длительности сегмента транскрипции
-                    overlap_ratio = overlap_duration / seg_duration if seg_duration > 0 else 0
-                    
-                    # Выбираем спикера с наибольшим пересечением
-                    if overlap_ratio > max_overlap:
-                        max_overlap = overlap_ratio
-                        best_speaker = speaker_id
-            
-            # Если пересечение слишком мало (< 20%), используем центр сегмента как fallback
-            if max_overlap < 0.2:
-                seg_mid = (seg_start + seg_end) / 2
+                if overlap_end > overlap_start:
+                    speaker_scores[speaker_id] += overlap_end - overlap_start
+
+            if speaker_scores:
+                segment_copy["speaker"] = max(speaker_scores, key=speaker_scores.get)
+            else:
+                midpoint = (seg_start + seg_end) / 2
+                assigned_speaker = 0
                 for diar_start, diar_end, speaker_id in diarization_result:
-                    if diar_start <= seg_mid <= diar_end:
-                        best_speaker = speaker_id
+                    if diar_start <= midpoint <= diar_end:
+                        assigned_speaker = speaker_id
                         break
-            
-            segment_copy['speaker'] = best_speaker
+                segment_copy["speaker"] = assigned_speaker
+
             diarized_segments.append(segment_copy)
-        
-        # Применяем постобработку для улучшения точности
-        diarized_segments = self._postprocess_diarization(diarized_segments)
-        
-        return diarized_segments
-    
+
+        return self._smooth_assigned_speakers(diarized_segments)
+
     def diarize(
-        self, 
-        segments: List[Dict], 
+        self,
+        segments: List[Dict],
         audio_path: Optional[str] = None,
-        hf_token: Optional[str] = None
+        hf_token: Optional[str] = None,
     ) -> List[Dict]:
-        """
-        Выполняет диаризацию сегментов транскрипции.
-        
-        Args:
-            segments: Список сегментов транскрипции
-            audio_path: Путь к аудио файлу (требуется для pyannote)
-            hf_token: Токен Hugging Face (опционально, для pyannote)
-        
-        Returns:
-            Список сегментов с добавленным ключом 'speaker'
-        """
-        if self.method == 'none':
+        """Run the selected diarization strategy."""
+        if self.method == "none":
+            self.resolved_device = "cpu"
             return segments
-        
-        if self.method == 'simple':
+
+        if self.method == "simple":
             return self.diarize_simple(segments)
-        
-        if self.method == 'pyannote':
+
+        if self.method in {"pyannote", "auto"}:
             if not audio_path:
-                raise ValueError("audio_path требуется для метода pyannote")
-            
+                raise ValueError("audio_path is required for pyannote diarization.")
             if not self.pyannote_available:
-                warnings.warn(
-                    "pyannote.audio недоступен, используется простой метод",
-                    UserWarning
-                )
-                return self.diarize_simple(segments)
-            
+                raise RuntimeError("pyannote.audio is not available. Install pyannote.audio to use this mode.")
             diarization_result = self.diarize_pyannote(audio_path, hf_token)
             return self.assign_speakers_to_segments(segments, diarization_result)
-        
-        if self.method == 'auto':
-            # Автоматический выбор: пробуем pyannote, если доступен, иначе simple
-            if self.pyannote_available and audio_path:
-                try:
-                    diarization_result = self.diarize_pyannote(audio_path, hf_token)
-                    return self.assign_speakers_to_segments(segments, diarization_result)
-                except Exception as e:
-                    warnings.warn(
-                        f"Не удалось использовать pyannote: {e}. Используется простой метод.",
-                        UserWarning
-                    )
-                    return self.diarize_simple(segments)
-            else:
-                return self.diarize_simple(segments)
-        
-        raise ValueError(f"Неизвестный метод диаризации: {self.method}")
+
+        raise ValueError(f"Unsupported diarization method: {self.method}")

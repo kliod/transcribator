@@ -8,7 +8,7 @@ from typing import Dict, List
 import click
 from tqdm import tqdm
 
-from .backends import DEFAULT_ENGINE, ENGINE_CHOICES
+from .backends import DEFAULT_DEVICE, DEFAULT_ENGINE, DEVICE_CHOICES, ENGINE_CHOICES
 from .config import create_default_config, load_config, merge_config_with_cli
 from .contracts import TranscriptionRequest
 from .service import TranscriptionService
@@ -44,6 +44,18 @@ from .utils import (
     default=None,
     type=click.Choice(WHISPER_MODEL_CHOICES, case_sensitive=False),
     help="Whisper model to use (default: from config or small).",
+)
+@click.option(
+    "--device",
+    default=None,
+    type=click.Choice(DEVICE_CHOICES, case_sensitive=False),
+    help="Execution device for faster-whisper: cpu, cuda, or auto.",
+)
+@click.option(
+    "--diarization-device",
+    default=None,
+    type=click.Choice(DEVICE_CHOICES, case_sensitive=False),
+    help="Execution device for pyannote diarization: cpu, cuda, or auto.",
 )
 @click.option(
     "--language",
@@ -187,6 +199,8 @@ def main(
     input_path: str,
     engine: str,
     model: str,
+    device: str,
+    diarization_device: str,
     language: str,
     output_formats: str,
     output_dir: str,
@@ -231,6 +245,8 @@ def main(
     for key, value in {
         "engine": engine,
         "model": model,
+        "device": device,
+        "diarization_device": diarization_device,
         "language": language,
         "output_formats": output_formats,
         "output_dir": output_dir,
@@ -261,6 +277,8 @@ def main(
 
     engine = str(cfg.get("engine") or DEFAULT_ENGINE).lower()
     model = str(cfg["model"])
+    device = str(cfg.get("device") or DEFAULT_DEVICE).lower()
+    diarization_device = str(cfg.get("diarization_device") or DEFAULT_DEVICE).lower()
     language = cfg["language"]
     output_formats = cfg["output_formats"]
     output_dir = cfg["output_dir"]
@@ -327,6 +345,8 @@ def main(
         click.echo(f"Files found: {len(file_list)}")
         click.echo(f"Engine: {engine}")
         click.echo(f"Model: {model} ({model_info.get('description', '')})")
+        click.echo(f"Device: {device}")
+        click.echo(f"Diarization device: {diarization_device}")
         click.echo(f"Quality: {'high' if high_quality else 'balanced'}")
         click.echo(f"Language: {language or 'auto'}")
         click.echo(f"Speaker diarization: {diarize}")
@@ -344,6 +364,8 @@ def main(
                 input_path=video_file,
                 model=model,
                 engine=engine,
+                device=device,
+                diarization_device=diarization_device,
                 language=language,
                 output_formats=formats,
                 output_dir=per_file_output_dir,

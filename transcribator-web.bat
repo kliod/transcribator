@@ -9,4 +9,4 @@ if not exist "%PYTHON%" (
   exit /b 1
 )
 
-"%PYTHON%" -m transcribator.cli %*
+"%PYTHON%" -m transcribator.webapp %*
