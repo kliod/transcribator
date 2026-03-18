@@ -1,528 +1,505 @@
-"""CLI интерфейс для транскрибации видео."""
+"""CLI interface for Transcribator."""
+
+from __future__ import annotations
+
+from pathlib import Path
+from typing import Dict, List
 
 import click
-from pathlib import Path
-from typing import List
 from tqdm import tqdm
-import os
 
-from .transcriber import VideoTranscriber
-from .exporter import export_transcription, export_txt
-from .diarization import SpeakerDiarizer
-from .config import load_config, merge_config_with_cli, get_config_path, create_default_config
+from .backends import DEFAULT_DEVICE, DEFAULT_ENGINE, DEVICE_CHOICES, ENGINE_CHOICES
+from .config import create_default_config, load_config, merge_config_with_cli
+from .contracts import TranscriptionRequest
+from .service import TranscriptionService
 from .utils import (
-    validate_input_path, 
-    ensure_output_directory, 
-    get_output_filename,
+    WHISPER_MODEL_CHOICES,
     check_ffmpeg,
-    get_model_info,
+    clear_model_cache,
+    ensure_output_directory,
     ensure_project_directories,
+    get_cached_models,
     get_default_input_directory,
     get_default_output_directory,
-    get_cached_models,
+    get_listed_model_keys,
+    get_model_info,
     get_whisper_cache_dir,
-    clear_model_cache
+    is_model_cached,
+    normalize_model_name,
+    validate_input_path,
 )
 
 
 @click.command()
-@click.argument('input_path', type=click.Path(exists=True), required=False)
+@click.argument("input_path", type=click.Path(exists=True), required=False)
 @click.option(
-    '--model',
-    '-m',
+    "--engine",
     default=None,
-    type=click.Choice(['tiny', 'base', 'small', 'medium', 'large', 'turbo'], case_sensitive=False),
-    help='Модель Whisper для использования (по умолчанию из конфига или small)'
+    type=click.Choice(ENGINE_CHOICES, case_sensitive=False),
+    help="Engine for local transcription (default: from config or faster-whisper).",
 )
 @click.option(
-    '--language',
-    '-l',
+    "--model",
+    "-m",
     default=None,
-    help='Язык для транскрибации (например, ru, en). Если не указан, язык определяется автоматически'
+    type=click.Choice(WHISPER_MODEL_CHOICES, case_sensitive=False),
+    help="Whisper model to use (default: from config or small).",
 )
 @click.option(
-    '--format',
-    '-f',
-    'output_formats',
+    "--device",
     default=None,
-    type=click.Choice(['txt', 'srt', 'vtt', 'all'], case_sensitive=False),
-    help='Формат вывода (txt, srt, vtt, all). По умолчанию из конфига или all'
+    type=click.Choice(DEVICE_CHOICES, case_sensitive=False),
+    help="Execution device for faster-whisper: cpu, cuda, or auto.",
 )
 @click.option(
-    '--output',
-    '-o',
-    'output_dir',
+    "--diarization-device",
     default=None,
-    type=click.Path(),
-    help='Выходная директория для сохранения результатов. По умолчанию: рядом с исходным файлом'
+    type=click.Choice(DEVICE_CHOICES, case_sensitive=False),
+    help="Execution device for pyannote diarization: cpu, cuda, or auto.",
 )
 @click.option(
-    '--quiet',
-    '-q',
-    is_flag=True,
-    help='Подавить вывод прогресса и информационных сообщений'
-)
-@click.option(
-    '--list-models',
-    is_flag=True,
-    help='Показать информацию о доступных моделях и выйти'
-)
-@click.option(
-    '--list-cached',
-    is_flag=True,
-    help='Показать закэшированные модели и выйти'
-)
-@click.option(
-    '--clear-cache',
-    'clear_cache_all',
-    is_flag=True,
-    help='Удалить все закэшированные модели'
-)
-@click.option(
-    '--clear-cache-model',
-    'clear_cache_model',
+    "--language",
+    "-l",
     default=None,
-    type=str,
-    help='Удалить конкретную модель из кэша (укажите имя модели: tiny, base, small, medium, large, turbo)'
+    help="Language code, for example ru or en. Leave empty for auto-detection.",
 )
 @click.option(
-    '--high-quality',
-    '-hq',
-    is_flag=True,
-    help='Использовать максимальные параметры качества (медленнее, но точнее)'
+    "--format",
+    "-f",
+    "output_formats",
+    default=None,
+    type=click.Choice(["txt", "srt", "vtt", "all"], case_sensitive=False),
+    help="Output format: txt, srt, vtt, or all.",
 )
 @click.option(
-    '--input',
-    'input_dir',
+    "--output",
+    "-o",
+    "output_dir",
     default=None,
     type=click.Path(),
-    help='Директория с входными видео файлами (по умолчанию: ./input/)'
+    help="Directory for result files.",
 )
 @click.option(
-    '--no-timestamps',
+    "--quiet",
+    "-q",
     is_flag=True,
-    help='Отключить тайминги в TXT формате'
+    help="Suppress informational output.",
 )
 @click.option(
-    '--clean-txt',
+    "--list-models",
     is_flag=True,
-    help='Создать дополнительный clean.txt без таймингов'
+    help="Show supported Whisper models and exit.",
 )
 @click.option(
-    '--diarize',
-    type=click.Choice(['none', 'simple', 'pyannote', 'auto'], case_sensitive=False),
-    default=None,
-    help='Метод разбивки по спикерам (none, simple, pyannote, auto). По умолчанию из конфига или none'
+    "--list-cached",
+    is_flag=True,
+    help="Show cached openai-whisper model files and exit.",
 )
 @click.option(
-    '--hf-token',
+    "--clear-cache",
+    "clear_cache_all",
+    is_flag=True,
+    help="Delete all cached openai-whisper model files.",
+)
+@click.option(
+    "--clear-cache-model",
+    "clear_cache_model",
     default=None,
     type=str,
-    help='Hugging Face токен для pyannote (опционально, требуется только для некоторых моделей)'
+    help="Delete one cached openai-whisper model (for example: small, large-v3, turbo).",
 )
 @click.option(
-    '--beam-size',
-    default=None,
-    type=int,
-    help='Размер луча для Whisper (1-10, по умолчанию 5 в режиме высокого качества)'
-)
-@click.option(
-    '--best-of',
-    default=None,
-    type=int,
-    help='Количество попыток для выбора лучшего результата Whisper (1-10, по умолчанию 5 в режиме высокого качества)'
-)
-@click.option(
-    '--preprocess-audio',
+    "--high-quality",
+    "-hq",
     is_flag=True,
-    help='Включить предобработку аудио (нормализация, шумоподавление) для улучшения качества'
+    help="Use slower but more accurate decoding settings.",
 )
 @click.option(
-    '--min-speakers',
+    "--input",
+    "input_dir",
+    default=None,
+    type=click.Path(),
+    help="Directory with input video files (default: ./input).",
+)
+@click.option(
+    "--no-timestamps",
+    is_flag=True,
+    help="Disable timestamps in TXT output.",
+)
+@click.option(
+    "--clean-txt",
+    is_flag=True,
+    help="Create an additional _clean.txt file without timestamps.",
+)
+@click.option(
+    "--diarize",
+    type=click.Choice(["none", "simple", "pyannote", "auto"], case_sensitive=False),
+    default=None,
+    help="Speaker diarization mode.",
+)
+@click.option(
+    "--hf-token",
+    default=None,
+    type=str,
+    help="Hugging Face token for pyannote diarization.",
+)
+@click.option(
+    "--beam-size",
     default=None,
     type=int,
-    help='Минимальное количество спикеров для pyannote (опционально)'
+    help="Beam size override for the selected engine.",
 )
 @click.option(
-    '--max-speakers',
+    "--best-of",
     default=None,
     type=int,
-    help='Максимальное количество спикеров для pyannote (опционально)'
+    help="Best-of override for the selected engine.",
 )
 @click.option(
-    '--diarization-threshold',
+    "--preprocess-audio",
+    is_flag=True,
+    help="Apply additional audio enhancement before transcription.",
+)
+@click.option(
+    "--min-speakers",
+    default=None,
+    type=int,
+    help="Minimum speaker count for pyannote.",
+)
+@click.option(
+    "--max-speakers",
+    default=None,
+    type=int,
+    help="Maximum speaker count for pyannote.",
+)
+@click.option(
+    "--diarization-threshold",
     default=None,
     type=float,
-    help='Порог кластеризации для pyannote (0.0-1.0, по умолчанию 0.7)'
+    help="Clustering threshold for pyannote.",
 )
 @click.option(
-    '--pause-threshold',
+    "--pause-threshold",
     default=None,
     type=float,
-    help='Порог паузы в секундах для простого метода диаризации (по умолчанию 2.0)'
+    help="Pause threshold in seconds for simple diarization.",
 )
 @click.option(
-    '--config',
+    "--config",
     default=None,
     type=click.Path(exists=False),
-    help='Путь к файлу конфигурации (JSON). Если не указан, используется transcribator.json в текущей директории или ~/.transcribator.json'
+    help="Optional config path (JSON).",
 )
 @click.option(
-    '--create-config',
+    "--create-config",
     is_flag=True,
-    help='Создать файл конфигурации с дефолтными значениями и выйти'
+    help="Create a default config file and exit.",
 )
-def main(input_path: str, model: str, language: str, output_formats: str, output_dir: str, quiet: bool, list_models: bool, high_quality: bool, input_dir: str, list_cached: bool, clear_cache_all: bool, clear_cache_model: str, no_timestamps: bool, clean_txt: bool, diarize: str, hf_token: str, beam_size: int, best_of: int, preprocess_audio: bool, min_speakers: int, max_speakers: int, diarization_threshold: float, pause_threshold: float, config: str, create_config: bool):
-    """
-    Транскрибирует видео файл или все видео файлы в директории.
-    
-    INPUT_PATH: Путь к видео файлу или директории с видео файлами
-    """
-    # Создание конфигурационного файла
+def main(
+    input_path: str,
+    engine: str,
+    model: str,
+    device: str,
+    diarization_device: str,
+    language: str,
+    output_formats: str,
+    output_dir: str,
+    quiet: bool,
+    list_models: bool,
+    high_quality: bool,
+    input_dir: str,
+    list_cached: bool,
+    clear_cache_all: bool,
+    clear_cache_model: str,
+    no_timestamps: bool,
+    clean_txt: bool,
+    diarize: str,
+    hf_token: str,
+    beam_size: int,
+    best_of: int,
+    preprocess_audio: bool,
+    min_speakers: int,
+    max_speakers: int,
+    diarization_threshold: float,
+    pause_threshold: float,
+    config: str,
+    create_config: bool,
+) -> None:
     if create_config:
         try:
             config_file = create_default_config(config)
-            click.echo(f"Конфигурационный файл создан: {config_file}")
-            click.echo("Отредактируйте его для настройки параметров по умолчанию.")
+            click.echo(f"Configuration file created: {config_file}")
             return
-        except Exception as e:
-            click.echo(f"Ошибка при создании конфигурационного файла: {e}", err=True)
+        except Exception as exc:
+            click.echo(f"Could not create config file: {exc}", err=True)
             return
-    
-    # Загрузка конфигурации
+
     try:
         file_config = load_config(config)
-    except ValueError as e:
-        click.echo(f"Предупреждение: {e}", err=True)
-        click.echo("Используются значения по умолчанию.")
+    except ValueError as exc:
+        click.echo(f"Warning: {exc}", err=True)
+        click.echo("Using default configuration values.", err=True)
         file_config = {}
-    
-    # Объединение конфигурации с параметрами CLI (CLI имеет приоритет)
-    # Для флагов (is_flag=True) None означает что флаг не был установлен
-    cli_params = {}
-    
-    # Параметры со значениями
-    if model is not None:
-        cli_params['model'] = model
-    if language is not None:
-        cli_params['language'] = language
-    if output_formats is not None:
-        cli_params['output_formats'] = output_formats
-    if output_dir is not None:
-        cli_params['output_dir'] = output_dir
-    if input_dir is not None:
-        cli_params['input_dir'] = input_dir
-    if diarize is not None:
-        cli_params['diarize'] = diarize
-    if hf_token is not None:
-        cli_params['hf_token'] = hf_token
-    if beam_size is not None:
-        cli_params['beam_size'] = beam_size
-    if best_of is not None:
-        cli_params['best_of'] = best_of
-    if min_speakers is not None:
-        cli_params['min_speakers'] = min_speakers
-    if max_speakers is not None:
-        cli_params['max_speakers'] = max_speakers
-    if diarization_threshold is not None:
-        cli_params['diarization_threshold'] = diarization_threshold
-    if pause_threshold is not None:
-        cli_params['pause_threshold'] = pause_threshold
-    
-    # Флаги (если установлены, переопределяют конфиг)
-    if quiet:
-        cli_params['quiet'] = True
-    if high_quality:
-        cli_params['high_quality'] = True
-    if no_timestamps:
-        cli_params['no_timestamps'] = True
-    if clean_txt:
-        cli_params['clean_txt'] = True
-    if preprocess_audio:
-        cli_params['preprocess_audio'] = True
-    
-    # Объединяем конфигурацию (файл -> CLI)
+
+    cli_params: Dict[str, object] = {}
+    for key, value in {
+        "engine": engine,
+        "model": model,
+        "device": device,
+        "diarization_device": diarization_device,
+        "language": language,
+        "output_formats": output_formats,
+        "output_dir": output_dir,
+        "input_dir": input_dir,
+        "diarize": diarize,
+        "hf_token": hf_token,
+        "beam_size": beam_size,
+        "best_of": best_of,
+        "min_speakers": min_speakers,
+        "max_speakers": max_speakers,
+        "diarization_threshold": diarization_threshold,
+        "pause_threshold": pause_threshold,
+    }.items():
+        if value is not None:
+            cli_params[key] = value
+
+    for key, value in {
+        "quiet": quiet,
+        "high_quality": high_quality,
+        "no_timestamps": no_timestamps,
+        "clean_txt": clean_txt,
+        "preprocess_audio": preprocess_audio,
+    }.items():
+        if value:
+            cli_params[key] = True
+
     cfg = merge_config_with_cli(file_config, cli_params)
-    
-    # Используем значения из объединенной конфигурации
-    model = cfg['model']
-    language = cfg['language']
-    output_formats = cfg['output_formats']
-    output_dir = cfg['output_dir']
-    quiet = cfg['quiet']
-    high_quality = cfg['high_quality']
-    input_dir = cfg['input_dir']
-    no_timestamps = cfg['no_timestamps']
-    clean_txt = cfg['clean_txt']
-    diarize = cfg['diarize']
-    hf_token = cfg['hf_token']
-    beam_size = cfg['beam_size']
-    best_of = cfg['best_of']
-    preprocess_audio = cfg['preprocess_audio']
-    min_speakers = cfg['min_speakers']
-    max_speakers = cfg['max_speakers']
-    diarization_threshold = cfg['diarization_threshold']
-    pause_threshold = cfg['pause_threshold']
-    
-    # Очистка кэша моделей
+
+    engine = str(cfg.get("engine") or DEFAULT_ENGINE).lower()
+    model = str(cfg["model"])
+    device = str(cfg.get("device") or DEFAULT_DEVICE).lower()
+    diarization_device = str(cfg.get("diarization_device") or DEFAULT_DEVICE).lower()
+    language = cfg["language"]
+    output_formats = cfg["output_formats"]
+    output_dir = cfg["output_dir"]
+    quiet = bool(cfg["quiet"])
+    high_quality = bool(cfg["high_quality"])
+    input_dir = cfg["input_dir"]
+    no_timestamps = bool(cfg["no_timestamps"])
+    clean_txt = bool(cfg["clean_txt"])
+    diarize = cfg["diarize"]
+    hf_token = cfg["hf_token"]
+    beam_size = cfg["beam_size"]
+    best_of = cfg["best_of"]
+    preprocess_audio = bool(cfg["preprocess_audio"])
+    min_speakers = cfg["min_speakers"]
+    max_speakers = cfg["max_speakers"]
+    diarization_threshold = cfg["diarization_threshold"]
+    pause_threshold = cfg["pause_threshold"]
+
     if clear_cache_all or clear_cache_model is not None:
-        cache_dir = get_whisper_cache_dir()
-        cached_models = get_cached_models()
-        
-        if clear_cache_all:
-            # Удалить все модели
-            if not cached_models:
-                click.echo("Кэш пуст. Нет моделей для удаления.")
-                return
-            
-            click.echo(f"Найдено моделей в кэше: {len(cached_models)}")
-            total_size = sum(m['size_bytes'] for m in cached_models.values())
-            click.echo(f"Общий размер: {round(total_size / (1024 * 1024), 2)} MB")
-            click.echo("\nВНИМАНИЕ: Будут удалены ВСЕ закэшированные модели!")
-            
-            if not quiet:
-                confirm = click.prompt("Продолжить? (yes/no)", default="no")
-                if confirm.lower() not in ['yes', 'y', 'да']:
-                    click.echo("Отменено.")
-                    return
-            
-            deleted_count, freed_mb = clear_model_cache()
-            click.echo(f"\nУдалено моделей: {deleted_count}")
-            click.echo(f"Освобождено места: {freed_mb} MB")
-        elif clear_cache_model:
-            # Удалить конкретную модель
-            if clear_cache_model not in cached_models:
-                click.echo(f"Модель '{clear_cache_model}' не найдена в кэше.", err=True)
-                if cached_models:
-                    click.echo("\nДоступные модели в кэше:")
-                    for model_name in sorted(cached_models.keys()):
-                        click.echo(f"  - {model_name}")
-                return
-            
-            model_info = cached_models[clear_cache_model]
-            click.echo(f"Модель: {clear_cache_model}")
-            click.echo(f"Размер: {model_info['size_mb']} MB")
-            click.echo(f"Файл: {model_info['file']}")
-            
-            if not quiet:
-                confirm = click.prompt("\nУдалить эту модель? (yes/no)", default="no")
-                if confirm.lower() not in ['yes', 'y', 'да']:
-                    click.echo("Отменено.")
-                    return
-            
-            deleted_count, freed_mb = clear_model_cache(clear_cache_model)
-            if deleted_count > 0:
-                click.echo(f"\nМодель '{clear_cache_model}' успешно удалена.")
-                click.echo(f"Освобождено места: {freed_mb} MB")
-            else:
-                click.echo(f"\nНе удалось удалить модель '{clear_cache_model}'.", err=True)
+        _handle_cache_commands(clear_cache_all, clear_cache_model, quiet)
         return
-    
-    # Показать информацию о закэшированных моделях и выйти
+
     if list_cached:
-        cache_dir = get_whisper_cache_dir()
-        cached_models = get_cached_models()
-        
-        click.echo(f"Кэш моделей Whisper: {cache_dir}\n")
-        
-        if cached_models:
-            click.echo("Закэшированные модели:\n")
-            for model_name, info in sorted(cached_models.items()):
-                click.echo(f"  {model_name:15} - {info['size_mb']} MB")
-                click.echo(f"           Файл: {info['file']}")
-            click.echo(f"\nВсего моделей: {len(cached_models)}")
-            total_size = sum(m['size_bytes'] for m in cached_models.values())
-            click.echo(f"Общий размер: {round(total_size / (1024 * 1024), 2)} MB")
-        else:
-            click.echo("Нет закэшированных моделей.")
-            click.echo("Модели будут загружены автоматически при первом использовании.")
+        _list_cached_models()
         return
-    
-    # Показать информацию о моделях и выйти
+
     if list_models:
-        click.echo("Доступные модели Whisper:\n")
-        models_info = get_model_info()
-        cached_models = get_cached_models()
-        
-        for model_key in ['tiny', 'base', 'small', 'medium', 'large', 'turbo']:
-            info = models_info[model_key]
-            cached_status = " [ЗАКЭШИРОВАНА]" if model_key in cached_models else ""
-            click.echo(f"  {info['name'].upper():8} - {info['description']}{cached_status}")
-            click.echo(f"           Размер: {info['size']:10} | Скорость: {info['speed']:15} | Точность: {info['accuracy']}")
-            if model_key == model:
-                click.echo(f"           (текущая модель по умолчанию)")
-            click.echo("")
+        _list_models(model)
         return
-    
-    # Проверка FFmpeg перед началом работы
+
     ffmpeg_available, ffmpeg_error = check_ffmpeg()
     if not ffmpeg_available:
-        click.echo(f"Ошибка: {ffmpeg_error}", err=True)
+        click.echo(f"Error: {ffmpeg_error}", err=True)
         return
-    
-    # Определяем входной путь
+
     if input_path is None:
-        # Если не указан input_path, используем input_dir или папку input по умолчанию
         if input_dir:
             input_path = input_dir
         else:
-            # Создаем папки input/ и output/ если не существуют
             ensure_project_directories()
             input_path = get_default_input_directory()
             if not quiet:
-                click.echo(f"Используется папка по умолчанию: {input_path}")
-    
-    # Проверка наличия input_path
+                click.echo(f"Using default input directory: {input_path}")
+
     if input_path is None:
-        click.echo("Ошибка: требуется указать путь к видео файлу или директории", err=True)
-        click.echo("Используйте --help для справки", err=True)
+        click.echo("Error: input path is required.", err=True)
         return
-    
-    # Определяем форматы вывода
-    if output_formats == 'all':
-        formats = ['txt', 'srt', 'vtt']
-    else:
-        formats = [output_formats]
-    
-    # Определяем выходную директорию по умолчанию если не указана
+
+    formats = ["txt", "srt", "vtt"] if output_formats == "all" else [output_formats]
+
     if output_dir is None:
         ensure_project_directories()
         output_dir = get_default_output_directory()
         if not quiet:
-            click.echo(f"Результаты будут сохранены в: {output_dir}")
-    
-    # Валидация входного пути
+            click.echo(f"Results will be saved to: {output_dir}")
+
     is_valid, error_message, file_list = validate_input_path(input_path)
-    
     if not is_valid:
-        click.echo(f"Ошибка: {error_message}", err=True)
+        click.echo(f"Error: {error_message}", err=True)
         return
-    
+
     if not quiet:
-        models_info = get_model_info()
-        model_info = models_info.get(model, {})
-        click.echo(f"Найдено файлов для обработки: {len(file_list)}")
-        click.echo(f"Модель: {model} ({model_info.get('description', '')})")
-        if high_quality:
-            click.echo("Режим: высокое качество (медленнее, но точнее)")
-        if language:
-            click.echo(f"Язык: {language}")
-        else:
-            click.echo("Язык: автоопределение")
-        click.echo(f"Форматы вывода: {', '.join(formats)}")
+        model_info = get_model_info().get(normalize_model_name(model) or model, {})
+        click.echo(f"Files found: {len(file_list)}")
+        click.echo(f"Engine: {engine}")
+        click.echo(f"Model: {model} ({model_info.get('description', '')})")
+        click.echo(f"Device: {device}")
+        click.echo(f"Diarization device: {diarization_device}")
+        click.echo(f"Quality: {'high' if high_quality else 'balanced'}")
+        click.echo(f"Language: {language or 'auto'}")
+        click.echo(f"Speaker diarization: {diarize}")
+        click.echo(f"Output formats: {', '.join(formats)}")
         click.echo("")
-    
-    # Инициализация транскрибатора
-    try:
-        transcriber = VideoTranscriber(
-            model_name=model,
-            language=language,
-            high_quality=high_quality,
-            beam_size=beam_size,
-            best_of=best_of,
-            preprocess_audio_flag=preprocess_audio
-        )
-    except Exception as e:
-        click.echo(f"Ошибка при инициализации транскрибатора: {e}", err=True)
-        return
-    
-    # Инициализация диаризатора если требуется
-    diarizer = None
-    if diarize != 'none':
-        try:
-            diarizer = SpeakerDiarizer(
-                method=diarize,
-                pause_threshold=pause_threshold if pause_threshold is not None else 2.0,
-                min_speakers=min_speakers,
-                max_speakers=max_speakers,
-                clustering_threshold=diarization_threshold
-            )
-            if not quiet:
-                click.echo(f"Диаризация: метод {diarize}")
-                if pause_threshold is not None and diarize == 'simple':
-                    click.echo(f"Порог паузы: {pause_threshold} сек")
-                if min_speakers is not None or max_speakers is not None:
-                    click.echo(f"Количество спикеров: {min_speakers or '?'}-{max_speakers or '?'}")
-                if diarization_threshold is not None:
-                    click.echo(f"Порог кластеризации: {diarization_threshold}")
-        except Exception as e:
-            click.echo(f"Предупреждение: не удалось инициализировать диаризатор: {e}", err=True)
-            if diarize == 'pyannote':
-                click.echo("Используется простой метод диаризации", err=True)
-                diarizer = SpeakerDiarizer(
-                    method='simple',
-                    pause_threshold=pause_threshold if pause_threshold is not None else 2.0
-                )
-    
-    # Обработка файлов
+
+    service = TranscriptionService()
     successful = 0
     failed = 0
-    
-    for video_file in tqdm(file_list, disable=quiet, desc="Обработка файлов"):
+
+    for video_file in tqdm(file_list, disable=quiet, desc="Processing files"):
         try:
-            # Определяем выходную директорию
-            output_directory = ensure_output_directory(output_dir, video_file)
-            
-            # Транскрибация
-            result = transcriber.transcribe(video_file)
-            segments = transcriber.get_segments_with_timestamps(result)
-            
-            # Применяем диаризацию если требуется
-            if diarizer:
-                try:
-                    # Для pyannote нужен путь к аудио файлу
-                    audio_path = video_file if diarize in ('pyannote', 'auto') else None
-                    segments = diarizer.diarize(segments, audio_path=audio_path, hf_token=hf_token)
-                except Exception as e:
-                    if not quiet:
-                        click.echo(f"Предупреждение: ошибка диаризации: {e}", err=True)
-                    # Если pyannote не работает, пробуем простой метод как fallback
-                    if diarize in ('pyannote', 'auto'):
-                        try:
-                            if not quiet:
-                                click.echo("Переключение на простой метод диаризации...", err=True)
-                            simple_diarizer = SpeakerDiarizer(method='simple')
-                            segments = simple_diarizer.diarize(segments, audio_path=None, hf_token=None)
-                        except Exception as e2:
-                            if not quiet:
-                                click.echo(f"Предупреждение: простой метод также не сработал: {e2}", err=True)
-                    # Продолжаем без диаризации
-            
-            # Экспорт результатов
-            output_base_path = get_output_filename(video_file, output_directory, '')
-            
-            # Определяем, включать ли тайминги в TXT
-            include_timestamps = not no_timestamps
-            
-            # Определяем, включать ли метки спикеров
-            include_speakers = diarizer is not None and any('speaker' in seg for seg in segments)
-            
-            # Экспорт в основные форматы
-            export_transcription(
-                segments, 
-                output_base_path, 
-                formats, 
-                include_timestamps_in_txt=include_timestamps,
-                include_speakers=include_speakers
+            per_file_output_dir = ensure_output_directory(output_dir, video_file)
+            request = TranscriptionRequest(
+                input_path=video_file,
+                model=model,
+                engine=engine,
+                device=device,
+                diarization_device=diarization_device,
+                language=language,
+                output_formats=formats,
+                output_dir=per_file_output_dir,
+                quiet=quiet,
+                high_quality=high_quality,
+                no_timestamps=no_timestamps,
+                clean_txt=clean_txt,
+                diarize=diarize,
+                hf_token=hf_token,
+                beam_size=beam_size,
+                best_of=best_of,
+                preprocess_audio=preprocess_audio,
+                min_speakers=min_speakers,
+                max_speakers=max_speakers,
+                diarization_threshold=diarization_threshold,
+                pause_threshold=pause_threshold,
             )
-            
-            # Создаем clean.txt если запрошено
-            if clean_txt:
-                clean_path = str(Path(output_base_path).with_name(Path(output_base_path).stem + '_clean.txt'))
-                export_txt(segments, clean_path, include_timestamps=False, include_speakers=include_speakers)
-            
+
+            status_callback = None if quiet else _make_status_callback(video_file)
+            result = service.transcribe_file(request, status_callback=status_callback)
+
+            if not quiet and result.artifacts:
+                click.echo(f"Completed: {video_file}")
+                for artifact_name, artifact_path in result.artifacts.items():
+                    click.echo(f"  {artifact_name}: {artifact_path}")
+
             successful += 1
-            
-        except Exception as e:
+        except Exception as exc:
             failed += 1
             if not quiet:
-                click.echo(f"\nОшибка при обработке {video_file}: {e}", err=True)
-    
-    # Итоговая статистика
+                click.echo(f"\nError while processing {video_file}: {exc}", err=True)
+
     if not quiet:
         click.echo("")
-        click.echo(f"Обработка завершена. Успешно: {successful}, Ошибок: {failed}")
+        click.echo(f"Finished. Successful: {successful}, Failed: {failed}")
 
 
-if __name__ == '__main__':
+def _make_status_callback(video_file: str):
+    label = Path(video_file).name
+    last_status = {"value": None}
+
+    def callback(status: str, message: str) -> None:
+        if status != last_status["value"]:
+            click.echo(f"[{label}] {status}: {message}")
+            last_status["value"] = status
+
+    return callback
+
+
+def _handle_cache_commands(clear_cache_all: bool, clear_cache_model: str, quiet: bool) -> None:
+    cached_models = get_cached_models()
+
+    if clear_cache_all:
+        if not cached_models:
+            click.echo("Cache is empty.")
+            return
+
+        click.echo(f"Cached models found: {len(cached_models)}")
+        total_size = sum(item["size_bytes"] for item in cached_models.values())
+        click.echo(f"Total size: {round(total_size / (1024 * 1024), 2)} MB")
+        if not quiet:
+            confirm = click.prompt("Delete all cached models? (yes/no)", default="no")
+            if confirm.lower() not in {"yes", "y"}:
+                click.echo("Cancelled.")
+                return
+
+        deleted_count, freed_mb = clear_model_cache()
+        click.echo(f"Deleted models: {deleted_count}")
+        click.echo(f"Freed space: {freed_mb} MB")
+        return
+
+    normalized_name = normalize_model_name(clear_cache_model)
+    if normalized_name not in cached_models:
+        click.echo(f"Model '{clear_cache_model}' was not found in cache.", err=True)
+        if cached_models:
+            click.echo("Available cached models:")
+            for model_name in sorted(cached_models):
+                click.echo(f"  - {model_name}")
+        return
+
+    info = cached_models[normalized_name]
+    click.echo(f"Model: {clear_cache_model}")
+    click.echo(f"Size: {info['size_mb']} MB")
+    click.echo(f"File: {info['file']}")
+    if not quiet:
+        confirm = click.prompt("Delete this cached model? (yes/no)", default="no")
+        if confirm.lower() not in {"yes", "y"}:
+            click.echo("Cancelled.")
+            return
+
+    deleted_count, freed_mb = clear_model_cache(clear_cache_model)
+    if deleted_count > 0:
+        click.echo(f"Deleted '{clear_cache_model}'.")
+        click.echo(f"Freed space: {freed_mb} MB")
+    else:
+        click.echo(f"Could not delete '{clear_cache_model}'.", err=True)
+
+
+def _list_cached_models() -> None:
+    cache_dir = get_whisper_cache_dir()
+    cached_models = get_cached_models()
+
+    click.echo(f"OpenAI Whisper cache: {cache_dir}\n")
+    if not cached_models:
+        click.echo("No cached openai-whisper models found.")
+        return
+
+    for model_name, info in sorted(cached_models.items()):
+        click.echo(f"  {model_name:15} - {info['size_mb']} MB")
+        click.echo(f"           File: {info['file']}")
+
+    total_size = sum(item["size_bytes"] for item in cached_models.values())
+    click.echo(f"\nTotal models: {len(cached_models)}")
+    click.echo(f"Total size: {round(total_size / (1024 * 1024), 2)} MB")
+
+
+def _list_models(selected_model: str) -> None:
+    click.echo("Supported Whisper models:\n")
+    models_info = get_model_info()
+    cached_models = get_cached_models()
+    selected_key = selected_model if selected_model in get_listed_model_keys() else normalize_model_name(selected_model)
+
+    for model_key in get_listed_model_keys():
+        info = models_info[model_key]
+        cached_status = " [CACHED]" if is_model_cached(model_key, cached_models) else ""
+        click.echo(f"  {info['name'].upper():14} - {info['description']}{cached_status}")
+        click.echo(
+            f"                 Size: {info['size']:10} | "
+            f"Speed: {info['speed']:15} | Accuracy: {info['accuracy']}"
+        )
+        if model_key == selected_key:
+            click.echo("                 (current default model)")
+        click.echo("")
+
+
+if __name__ == "__main__":
     main()

@@ -1,22 +1,32 @@
-# Виртуальное окружение
+# Virtual environments
 .venv/
 venv/
 env/
 
-# Python
+# Python caches and build artifacts
 __pycache__/
 *.py[cod]
 *.egg-info/
 .eggs/
 dist/
 build/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
 
-# Локальный конфиг с токенами
+# Local developer tooling
+.idea/
+.vscode/
+
+# Local user configuration
 transcribator.json
+.transcribator.json
 
-# Кэш Whisper
+# Runtime and user-generated artifacts
 .cache/
-
-# Данные (не коммитим вход и выход)
-input/
-output/
+/input/
+/output/
+*.log

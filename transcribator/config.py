@@ -7,6 +7,9 @@ import os
 
 
 DEFAULT_CONFIG = {
+    "engine": "faster-whisper",
+    "device": "cpu",
+    "diarization_device": "cpu",
     "model": "small",
     "language": None,
     "output_formats": "all",

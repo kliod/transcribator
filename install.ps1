@@ -1,46 +1,52 @@
 #Requires -Version 5.1
 <#
 .SYNOPSIS
-    Первичная полная установка Transcribator: Python-окружение, зависимости, FFmpeg.
+    One-command bootstrap для установки Transcribator на Windows.
 
 .DESCRIPTION
-    Скрипт проверяет Python 3.8+, создаёт виртуальное окружение (по умолчанию),
-    устанавливает зависимости из requirements.txt и пакет в режиме разработки,
-    опционально — pyannote.audio, проверяет/устанавливает FFmpeg.
+    Скрипт использует uv как основной менеджер окружения:
+    - проверяет и при необходимости устанавливает uv
+    - обеспечивает Python 3.12
+    - пересоздаёт .venv
+    - выполняет uv sync
+    - опционально настраивает pyannote GPU overlay
+    - печатает каноничные команды запуска через локальный .venv
 
-.PARAMETER NoVenv
-    Не создавать venv, использовать системный Python (не рекомендуется).
+.PARAMETER CpuOnly
+    Установить только CPU-first вариант без GPU overlay для pyannote.
 
-.PARAMETER InstallPyannote
-    Установить pyannote.audio для разбивки по спикерам (без запроса).
+.PARAMETER WithPyannote
+    Считать, что pyannote планируется использовать, и показать финальные шаги для HF token/access.
 
-.PARAMETER SkipPyannote
-    Не предлагать установку pyannote.audio.
+.PARAMETER WithPyannoteGpu
+    Поверх базовой установки накатить CUDA-сборки torch/torchaudio для pyannote diarization.
+    Имплицитно включает WithPyannote.
+
+.PARAMETER NoPrompt
+    Не задавать интерактивные вопросы. Все решения берутся из флагов.
 
 .PARAMETER SkipFfmpegCheck
-    Не проверять и не устанавливать FFmpeg.
+    Не запускать check_ffmpeg.ps1 в конце установки.
 
 .PARAMETER Quiet
-    Минимум вывода, только ошибки и итог.
+    Минимум служебного вывода.
 
 .EXAMPLE
     .\install.ps1
-    Полная установка с запросом по venv и pyannote.
 
 .EXAMPLE
-    .\install.ps1 -InstallPyannote
-    Установка с pyannote.audio без запроса.
+    .\install.ps1 -NoPrompt -CpuOnly
 
 .EXAMPLE
-    .\install.ps1 -NoVenv -SkipPyannote
-    Установка в системный Python без pyannote.
+    .\install.ps1 -NoPrompt -WithPyannote -WithPyannoteGpu
 #>
 
 [CmdletBinding()]
 param(
-    [switch] $NoVenv,
-    [switch] $InstallPyannote,
-    [switch] $SkipPyannote,
+    [switch] $CpuOnly,
+    [switch] $WithPyannote,
+    [switch] $WithPyannoteGpu,
+    [switch] $NoPrompt,
     [switch] $SkipFfmpegCheck,
     [switch] $Quiet
 )
@@ -49,136 +55,211 @@ $ErrorActionPreference = "Stop"
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 $OutputEncoding = [System.Text.Encoding]::UTF8
 
-function Write-Step { param($Message) if (-not $Quiet) { Write-Host $Message -ForegroundColor Cyan } }
-function Write-Ok    { param($Message) if (-not $Quiet) { Write-Host $Message -ForegroundColor Green } }
-function Write-Warn  { param($Message) if (-not $Quiet) { Write-Host $Message -ForegroundColor Yellow } }
-function Write-Err   { param($Message) Write-Host $Message -ForegroundColor Red }
+function Write-Step {
+    param([string] $Message)
+    if (-not $Quiet) { Write-Host $Message -ForegroundColor Cyan }
+}
+
+function Write-Ok {
+    param([string] $Message)
+    if (-not $Quiet) { Write-Host $Message -ForegroundColor Green }
+}
+
+function Write-Warn {
+    param([string] $Message)
+    if (-not $Quiet) { Write-Host $Message -ForegroundColor Yellow }
+}
+
+function Write-Err {
+    param([string] $Message)
+    Write-Host $Message -ForegroundColor Red
+}
+
+function Confirm-Choice {
+    param(
+        [string] $Prompt,
+        [bool] $Default = $false
+    )
+
+    if ($NoPrompt) {
+        return $Default
+    }
+
+    $suffix = if ($Default) { "[Y/n]" } else { "[y/N]" }
+    $raw = Read-Host "$Prompt $suffix"
+    if ([string]::IsNullOrWhiteSpace($raw)) {
+        return $Default
+    }
+    return $raw -match "^[YyАа]"
+}
+
+function Ensure-Uv {
+    $uvCommand = Get-Command uv -ErrorAction SilentlyContinue
+    if ($uvCommand) {
+        return $uvCommand.Source
+    }
+
+    Write-Step "`n=== Установка uv ==="
+    Write-Step "uv не найден. Пробую установить через официальный install script..."
+
+    try {
+        & powershell -NoProfile -ExecutionPolicy Bypass -Command "irm https://astral.sh/uv/install.ps1 | iex"
+    } catch {
+        Write-Err "Не удалось установить uv автоматически. Установите uv вручную и повторите запуск."
+        Write-Err "Сайт: https://docs.astral.sh/uv/"
+        exit 1
+    }
+
+    $candidatePaths = @(
+        (Join-Path $env:USERPROFILE ".local\bin\uv.exe"),
+        (Join-Path $env:USERPROFILE ".cargo\bin\uv.exe")
+    )
+
+    foreach ($candidate in $candidatePaths) {
+        if (Test-Path $candidate) {
+            $candidateDir = Split-Path $candidate -Parent
+            $pathItems = $env:PATH -split ';'
+            if ($pathItems -notcontains $candidateDir) {
+                $env:PATH = "$candidateDir;$env:PATH"
+            }
+            return $candidate
+        }
+    }
+
+    $uvCommand = Get-Command uv -ErrorAction SilentlyContinue
+    if ($uvCommand) {
+        return $uvCommand.Source
+    }
+
+    Write-Err "uv установлен, но не найден в PATH. Перезапустите PowerShell и повторите запуск."
+    exit 1
+}
+
+function Get-TorchBaseVersion {
+    param([string] $PythonExe)
+    return (& $PythonExe -c "import torch; print(torch.__version__.split('+')[0])").Trim()
+}
 
 $ProjectRoot = $PSScriptRoot
 Set-Location $ProjectRoot
 
-# ----- 1. Python -----
-Write-Step "`n=== 1. Проверка Python ==="
-$py = $null
-foreach ($cmd in @("python", "python3", "py")) {
-    try {
-        $info = & $cmd -c "import sys; print(sys.version_info.major, sys.version_info.minor)" 2>$null
-        if ($info) {
-            $py = $cmd
-            $major, $minor = $info.Trim().Split()
-            break
-        }
-    } catch { continue }
+if ($WithPyannoteGpu) {
+    $WithPyannote = $true
+}
+if ($CpuOnly) {
+    $WithPyannoteGpu = $false
 }
 
-if (-not $py) {
-    Write-Err "Python не найден. Установите Python 3.8+ с https://www.python.org/downloads/ или через winget: winget install Python.Python.3.12"
-    exit 1
-}
-
-if ([int]$major -lt 3 -or ([int]$major -eq 3 -and [int]$minor -lt 8)) {
-    Write-Err "Требуется Python 3.8 или выше. Найдено: $major.$minor"
-    exit 1
-}
-Write-Ok "Python $major.$minor найден: $py"
-
-# ----- 2. Виртуальное окружение -----
-$venvPath = Join-Path $ProjectRoot ".venv"
-$useVenv = -not $NoVenv
-
-if ($useVenv) {
-    Write-Step "`n=== 2. Виртуальное окружение ==="
-    if (Test-Path $venvPath) {
-        Write-Ok "Каталог .venv уже существует."
-    } else {
-        Write-Step "Создание .venv..."
-        & $py -m venv $venvPath
-        if ($LASTEXITCODE -ne 0) { Write-Err "Не удалось создать venv."; exit 1 }
-        Write-Ok "Создано: $venvPath"
+if (-not $NoPrompt) {
+    if (-not $WithPyannote -and -not $WithPyannoteGpu) {
+        $WithPyannote = Confirm-Choice "Планируете использовать pyannote для diarization?" $false
     }
-    $pythonExe = Join-Path $venvPath "Scripts\python.exe"
-    if (-not (Test-Path $pythonExe)) { Write-Err "Не найден $pythonExe"; exit 1 }
+    if ($WithPyannote -and -not $CpuOnly -and -not $WithPyannoteGpu) {
+        $WithPyannoteGpu = Confirm-Choice "Нужен GPU overlay для pyannote diarization?" $false
+    }
+}
+
+Write-Step "`n=== 1. uv ==="
+$uvExe = Ensure-Uv
+Write-Ok "uv готов: $uvExe"
+
+Write-Step "`n=== 2. Python 3.12 ==="
+& $uvExe python install 3.12
+if ($LASTEXITCODE -ne 0) {
+    Write-Err "Не удалось подготовить Python 3.12 через uv."
+    exit 1
+}
+Write-Ok "Python 3.12 подготовлен."
+
+Write-Step "`n=== 3. Виртуальное окружение ==="
+& $uvExe venv --python 3.12 --clear .venv
+if ($LASTEXITCODE -ne 0) {
+    Write-Err "Не удалось пересоздать .venv на Python 3.12."
+    exit 1
+}
+
+$pythonExe = Join-Path $ProjectRoot ".venv\Scripts\python.exe"
+if (-not (Test-Path $pythonExe)) {
+    Write-Err "Не найден $pythonExe"
+    exit 1
+}
+Write-Ok ".venv создан."
+
+Write-Step "`n=== 4. Базовая установка проекта ==="
+& $uvExe sync
+if ($LASTEXITCODE -ne 0) {
+    Write-Err "uv sync завершился ошибкой."
+    exit 1
+}
+Write-Ok "Базовая CPU-first установка завершена."
+
+if ($WithPyannoteGpu) {
+    Write-Step "`n=== 5. GPU overlay для pyannote ==="
+    $torchVersion = Get-TorchBaseVersion -PythonExe $pythonExe
+    Write-Step "Устанавливаю CUDA-сборки torch/torchaudio версии $torchVersion..."
+    & $uvExe pip install `
+        --python $pythonExe `
+        --index-url https://download.pytorch.org/whl/cu128 `
+        --reinstall `
+        "torch==$torchVersion" `
+        "torchaudio==$torchVersion"
+
+    if ($LASTEXITCODE -ne 0) {
+        Write-Err "Не удалось установить CUDA-сборки torch/torchaudio."
+        exit 1
+    }
+
+    $cudaCheck = & $pythonExe -c "import torch; print(torch.__version__); print(torch.version.cuda); print(torch.cuda.is_available()); print(torch.cuda.device_count())"
+    Write-Ok "GPU overlay установлен."
+    if (-not $Quiet) {
+        Write-Host $cudaCheck
+    }
 } else {
-    Write-Step "`n=== 2. Системный Python (venv пропущен) ==="
-    $pythonExe = $py
+    Write-Step "`n=== 5. GPU overlay ==="
+    Write-Ok "Пропущено. Остаёмся на CPU-first варианте."
 }
 
-# ----- 3. pip и зависимости -----
-Write-Step "`n=== 3. Зависимости ==="
-& $pythonExe -m pip install --upgrade pip --quiet
-$reqPath = Join-Path $ProjectRoot "requirements.txt"
-if (-not (Test-Path $reqPath)) { Write-Err "Не найден requirements.txt"; exit 1 }
-& $pythonExe -m pip install -r $reqPath
-if ($LASTEXITCODE -ne 0) { Write-Err "Ошибка установки зависимостей."; exit 1 }
-Write-Ok "Установлены пакеты из requirements.txt"
-
-# ----- 4. Pyannote (опционально) -----
-$doPyannote = $InstallPyannote
-if (-not $SkipPyannote -and -not $InstallPyannote -and -not $Quiet) {
-    $r = Read-Host "Установить pyannote.audio для разбивки по спикерам? (y/N)"
-    $doPyannote = ($r -match '^[yY]')
-}
-if ($doPyannote) {
-    Write-Step "Установка pyannote.audio..."
-    & $pythonExe -m pip install pyannote.audio
-    if ($LASTEXITCODE -eq 0) { Write-Ok "pyannote.audio установлен." }
-    else { Write-Warn "Ошибка установки pyannote.audio. Диаризация pyannote будет недоступна." }
-}
-
-# ----- 5. Установка пакета в режиме разработки -----
-Write-Step "`n=== 4. Установка Transcribator ==="
-& $pythonExe -m pip install -e .
-if ($LASTEXITCODE -ne 0) { Write-Err "Ошибка установки пакета."; exit 1 }
-Write-Ok "Пакет transcribator установлен (editable)."
-
-# ----- 6. FFmpeg -----
 if (-not $SkipFfmpegCheck) {
-    Write-Step "`n=== 5. FFmpeg ==="
+    Write-Step "`n=== 6. FFmpeg ==="
     $ffmpegScript = Join-Path $ProjectRoot "check_ffmpeg.ps1"
     if (Test-Path $ffmpegScript) {
         & $ffmpegScript
     } else {
-        $hasFfmpeg = $false
-        try { $null = Get-Command ffmpeg -ErrorAction Stop; $hasFfmpeg = $true } catch {}
-        if (-not $hasFfmpeg) {
-            Write-Warn "FFmpeg не найден. Установите вручную или выполните: winget install ffmpeg"
-        } else {
-            Write-Ok "FFmpeg найден."
-        }
+        Write-Warn "check_ffmpeg.ps1 не найден. Проверьте FFmpeg вручную: ffmpeg -version"
     }
 } else {
-    Write-Step "`n=== 5. FFmpeg (проверка пропущена) ==="
+    Write-Step "`n=== 6. FFmpeg ==="
+    Write-Ok "Проверка FFmpeg пропущена."
 }
 
-# ----- Итог -----
 Write-Host ""
 Write-Host "========================================" -ForegroundColor Green
-Write-Host "  Установка завершена." -ForegroundColor Green
+Write-Host "  Установка завершена" -ForegroundColor Green
 Write-Host "========================================" -ForegroundColor Green
 Write-Host ""
 
-if ($useVenv) {
-    Write-Host "Активация окружения:" -ForegroundColor Cyan
-    Write-Host "  .\.venv\Scripts\Activate.ps1" -ForegroundColor White
+Write-Host "Каноничные команды запуска:" -ForegroundColor Cyan
+Write-Host "  .\transcribator-web.bat" -ForegroundColor White
+Write-Host "  .\transcribator.bat --list-models" -ForegroundColor White
+Write-Host "  .\transcribator.bat `"D:\path\to\video.mp4`"" -ForegroundColor White
+Write-Host ""
+
+Write-Host "Fallback без wrapper-скриптов:" -ForegroundColor Cyan
+Write-Host "  .\.venv\Scripts\python.exe -m transcribator.webapp" -ForegroundColor White
+Write-Host "  .\.venv\Scripts\python.exe -m transcribator.cli --help" -ForegroundColor White
+Write-Host ""
+
+Write-Warn "Для GPU overlay не используйте обычный 'uv run ...' — он может вернуть torch/torchaudio к CPU-версии из lock-файла."
+Write-Host "Безопасная альтернатива: uv run --no-sync transcribator-web" -ForegroundColor White
+
+if ($WithPyannote) {
     Write-Host ""
-    Write-Host "Запуск (из этой папки после активации):" -ForegroundColor Cyan
-    Write-Host "  transcribator --list-models" -ForegroundColor White
-    Write-Host "  transcribator video.mp4" -ForegroundColor White
+    Write-Warn "Для pyannote заранее примите доступы на Hugging Face и используйте token:"
+    Write-Host "  https://huggingface.co/pyannote/speaker-diarization-3.1" -ForegroundColor White
+    Write-Host "  https://huggingface.co/pyannote/segmentation-3.0" -ForegroundColor White
+    Write-Host "  https://huggingface.co/pyannote/speaker-diarization-community-1" -ForegroundColor White
     Write-Host ""
-    Write-Host "Или без активации:" -ForegroundColor Cyan
-    Write-Host "  .\.venv\Scripts\python.exe -m transcribator.cli --list-models" -ForegroundColor White
-} else {
-    Write-Host "Запуск:" -ForegroundColor Cyan
-    Write-Host "  transcribator --list-models" -ForegroundColor White
-    Write-Host "  python -m transcribator.cli video.mp4" -ForegroundColor White
+    Write-Host "Токен можно передать через web UI, config (hf_token) или --hf-token." -ForegroundColor White
 }
 
-if ($doPyannote) {
-    Write-Host ""
-    Write-Warn "Для диаризации pyannote примите условия на Hugging Face и укажите токен:"
-    Write-Host "  https://huggingface.co/pyannote/speaker-diarization-3.1"
-    Write-Host "  https://huggingface.co/pyannote/segmentation-3.0"
-    Write-Host "  https://huggingface.co/pyannote/speaker-diarization-community-1"
-    Write-Host "  Токен: в transcribator.json (hf_token) или --hf-token при запуске."
-}
 Write-Host ""
